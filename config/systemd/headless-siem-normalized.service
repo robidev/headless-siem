@@ -1,0 +1,45 @@
+[Unit]
+Description=Headless SIEM - Log Normalizer
+Documentation=https://github.com/your-org/headless-siem
+After=network.target headless-siem-pipes.service
+Requires=headless-siem-pipes.service
+
+# normalized reads syslog lines from a named pipe written by rsyslog and
+# writes normalized JSONL to another named pipe consumed by ruled.
+#
+# rsyslog side: see config/rsyslog.d/50-headless-siem.conf — rsyslog appends
+# to /run/headless-siem/normalized-in.pipe using omfile (no omprog needed).
+#
+# Alternative — standalone UDP/TCP receiver (no rsyslog omprog, no named pipe):
+#   1. Remove StandardInput= and replace --stdin with nothing (use default mode)
+#   2. Set [listen] in normalized.toml for the desired port
+#   3. Configure rsyslog with omfwd to forward to that address/port
+#   4. Add AmbientCapabilities=CAP_NET_BIND_SERVICE if port < 1024
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/projects/headless-siem
+
+ExecStart=/home/user/projects/headless-siem/src/normalized/target/release/normalized \
+  --stdin \
+  --data-dir /home/user/projects/headless-siem/data \
+  --config /home/user/projects/headless-siem/config/normalized.toml
+
+StandardInput=file:/run/headless-siem/normalized-in.pipe
+StandardOutput=file:/run/headless-siem/normalized-out.pipe
+StandardError=journal
+
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/home/user/projects/headless-siem/data /run/headless-siem
+ReadOnlyPaths=/home/user/projects/headless-siem/config
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+[Unit]
+Description=Headless SIEM - Alert Correlation Engine
+Documentation=https://github.com/your-org/headless-siem
+After=network.target headless-siem-pipes.service headless-siem-ruled.service
+Requires=headless-siem-pipes.service
+Wants=headless-siem-ruled.service
+
+[Service]
+Type=simple
+User=user
+Environment=HEADLESS_SIEM_ROOT=/home/user/projects/headless-siem
+WorkingDirectory=/home/user/projects/headless-siem
+ExecStart=/home/user/projects/headless-siem/src/correlated/target/release/correlated \
+  --window 300 \
+  --threshold 5 \
+  --output /home/user/projects/headless-siem/data/correlated
+StandardInput=file:/run/headless-siem/ruled-out.pipe
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/home/user/projects/headless-siem/data/correlated /run/headless-siem
+ReadOnlyPaths=/home/user/projects/headless-siem/config
+
+[Install]
+WantedBy=multi-user.target

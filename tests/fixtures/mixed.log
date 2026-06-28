@@ -1,0 +1,25 @@
+{"_raw":"Jun 22 08:55:03 myhost sshd[1234]: Failed password for root from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:07 myhost kernel: [UFW BLOCK] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=10.0.0.5 DST=192.168.1.1 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=12345 DF PROTO=TCP SPT=443 DPT=22 WINDOW=65535 RES=0x00 SYN URGP=0","_source":"iptables"}
+{"_raw":"Jun 22 08:55:12 myhost sudo: pam_unix(sudo:auth): authentication failure; logname=uid=1000 euid=0 tty=/dev/pts/0 ruser=user rhost= user=user","_source":"sudo"}
+{"_raw":"Jun 22 08:55:15 myhost systemd[1]: Started Session c1 of user user.","_source":"systemd"}
+{"_raw":"Jun 22 08:55:18 myhost sshd[1234]: Failed password for admin from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:20 myhost kernel: [UFW BLOCK] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=10.0.0.6 DST=192.168.1.1 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=12348 DF PROTO=TCP SPT=443 DPT=22 WINDOW=65535 RES=0x00 SYN URGP=0","_source":"iptables"}
+{"_raw":"Jun 22 08:55:22 myhost sudo: user : TTY=pts/0 ; PWD=/home/user ; USER=root ; COMMAND=/usr/bin/apt update","_source":"sudo"}
+{"_raw":"Jun 22 08:55:25 myhost systemd[1]: Starting Cleanup of Temporary Directories...","_source":"systemd"}
+{"_raw":"Jun 22 08:55:28 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:30 myhost kernel: [UFW BLOCK] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=10.0.0.9 DST=192.168.1.1 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=12351 DF PROTO=TCP SPT=443 DPT=22 WINDOW=65535 RES=0x00 SYN URGP=0","_source":"iptables"}
+{"_raw":"Jun 22 08:55:33 myhost sudo: pam_unix(sudo:session): session opened for user root by user(uid=0)","_source":"sudo"}
+{"_raw":"Jun 22 08:55:35 myhost systemd[1]: Stopping User Manager for UID 1000...","_source":"systemd"}
+{"_raw":"Jun 22 08:55:38 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:40 myhost kernel: [UFW BLOCK] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=10.0.0.11 DST=192.168.1.1 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=12353 DF PROTO=TCP SPT=443 DPT=22 WINDOW=65535 RES=0x00 SYN URGP=0","_source":"iptables"}
+{"_raw":"Jun 22 08:55:42 myhost sudo: pam_unix(sudo:session): session closed for user root","_source":"sudo"}
+{"_raw":"Jun 22 08:55:45 myhost systemd[1]: Stopped User Manager for UID 1000.","_source":"systemd"}
+{"_raw":"Jun 22 08:55:48 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:50 myhost kernel: [UFW ALLOW] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=192.168.1.100 DST=192.168.1.1 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=12355 DF PROTO=TCP SPT=22 DPT=22 WINDOW=65535 RES=0x00 SYN URGP=0","_source":"iptables"}
+{"_raw":"Jun 22 08:55:52 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:55 myhost systemd[1]: Started Getty on tty1.","_source":"systemd"}
+{"_raw":"Jun 22 08:56:01 myhost sshd[1234]: Accepted password for user from 192.168.1.100 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:56:05 myhost kernel: [UFW AUDIT] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=10.0.0.13 DST=192.168.1.1 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=12356 DF PROTO=TCP SPT=8080 DPT=80 WINDOW=65535 RES=0x00 SYN URGP=0","_source":"iptables"}
+{"_raw":"Jun 22 08:56:10 myhost sshd[1235]: pam_unix(sshd:session): session opened for user user by (uid=0)","_source":"sshd"}
+{"_raw":"Jun 22 08:57:00 myhost sshd[1235]: pam_unix(sshd:session): session closed for user user","_source":"sshd"}
+{"_raw":"Jun 22 09:00:00 myhost sshd[1400]: Connection closed by authenticating user root 10.0.0.5 port 22 [preauth]","_source":"sshd"}

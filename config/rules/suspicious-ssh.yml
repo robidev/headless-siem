@@ -1,0 +1,14 @@
+title: Suspicious Internal SSH from External IP
+id: 1004-suspicious-ssh
+status: experimental
+level: high
+description: SSH failed login from an IP outside the internal network
+logsource:
+  service: sshd
+detection:
+  selection:
+    _source_type: sshd
+    invalid_username|contains: ""
+  filter:
+    src_ip|startswith: "10.0."
+  condition: selection and not filter

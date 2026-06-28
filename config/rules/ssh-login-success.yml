@@ -1,0 +1,12 @@
+title: SSH Login Success
+id: 1005-ssh-login-success
+status: stable
+level: info
+description: Detects successful SSH password or publickey authentication
+logsource:
+  service: sshd
+detection:
+  selection:
+    _source_type: sshd
+    event_type: ssh_auth_success
+  condition: selection

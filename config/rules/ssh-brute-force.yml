@@ -1,0 +1,12 @@
+title: SSH Brute Force Detection
+id: 1001-ssh-brute-force
+status: stable
+level: medium
+description: Detects multiple failed SSH password attempts from the same source IP
+logsource:
+  service: sshd
+detection:
+  selection:
+    _source_type: sshd
+    invalid_username|contains: ""
+  condition: selection

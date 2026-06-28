@@ -1,0 +1,31 @@
+[Unit]
+Description=Headless SIEM - Filesystem Watcher & SQLite Indexer
+Documentation=https://github.com/your-org/headless-siem
+After=network.target headless-siem-normalized.service
+Wants=headless-siem-normalized.service
+
+[Service]
+Type=simple
+User=user
+Environment=HEADLESS_SIEM_ROOT=/home/user/projects/headless-siem
+WorkingDirectory=/home/user/projects/headless-siem
+ExecStart=/home/user/projects/headless-siem/src/indexd/target/release/indexd --data-dir /home/user/projects/headless-siem/data
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+
+# indexd uses blocking inotify reads — needs a kill timeout
+TimeoutStopSec=10
+KillSignal=SIGKILL
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/home/user/projects/headless-siem/data
+ReadOnlyPaths=/home/user/projects/headless-siem/config
+
+[Install]
+WantedBy=multi-user.target

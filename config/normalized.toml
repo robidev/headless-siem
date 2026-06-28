@@ -1,0 +1,319 @@
+# Extraction rules for common Linux log sources piped through journalctl.
+#
+# Usage:  journalctl | normalized --stdin --config config/normalized.toml
+#
+# Design: each source uses two passes.
+#   Pass 1  — one [[extract.rule]] per source with multiple `pattern =` lines.
+#             Named captures add fields; earlier captures win (no clobbering).
+#             No `set` here — `set` applies whenever conditions match, so mixing
+#             `set` with pass-1 patterns would assign event_type to every event
+#             from that source.
+#   Pass 2  — one [[extract.rule]] per event type.  The condition tests a short
+#             discriminating field captured in pass 1, so only the matching
+#             event type gets the `set`.  Rules run in order; later `set` calls
+#             overwrite earlier ones, so source-specific rules can intentionally
+#             override a generic assignment (see systemd session_start).
+
+[listen]
+udp_port = 514
+tcp_port = 514
+
+[storage]
+data_dir = "data"
+
+# Relabel kernel UFW lines as source "iptables" so sources.toml index_fields
+# apply correctly.  The extract rules below still condition on app_name = "kernel"
+# because override rules change the source label but not app_name.
+[[overrides.rule]]
+contains = "[UFW "
+source = "iptables"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sshd
+#
+# Patterns handled:
+#   Failed/Accepted (password|publickey) for [invalid user] <user> from <ip> port <port>
+#   pam_unix(sshd:session): session (opened|closed) for user <user>
+#   Connection closed by [authenticating] user <user> <ip> port <port> [preauth]
+#   Invalid user <user> from <ip> port <port>
+#   Did not receive identification string from <ip> port <port>
+#   Connection reset by <ip> port <port> [preauth]
+#   Received disconnect from <ip> port <port>:<reason>
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "sshd"
+from = "message"
+# Auth: Failed/Accepted password|publickey for [invalid user] <user> from <ip>
+pattern = "^(?P<auth_action>Failed|Accepted) (?P<auth_method>\w+) for (?:invalid user )?(?P<username>\S+) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
+# PAM session open/close
+pattern = "session (?P<session_action>opened|closed) for user (?P<username>\S+)"
+# Preauth connection close with authenticating user
+pattern = "Connection (?P<conn_action>closed) by (?:authenticating )?user (?P<username>\S+) (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
+# Standalone invalid-user probe (anchored so it doesn't match "for invalid user" in auth lines)
+pattern = "^(?P<sshd_invalid>Invalid user) (?P<username>\S+) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
+# Network-level preauth events — capture src_ip and a tag for pass-2 dispatch
+pattern = "(?P<sshd_event>Did not receive identification string) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
+pattern = "(?P<sshd_event>Connection reset) by (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
+pattern = "(?P<sshd_event>Received disconnect) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
+pattern = "^(?P<auth_action>Timeout) before authentication for connection from (?P<src_ip>[\d.]+) to (?P<dst_ip>[\d.]+), pid = (?P<pid>[\d]+)"
+
+[[extract.rule]]
+app_name = "sshd"
+auth_action = "Timeout"
+set = { event_type = "ssh_auth_timeout" }
+
+[[extract.rule]]
+app_name = "sshd"
+auth_action = "Failed"
+set = { event_type = "ssh_auth_failure" }
+
+[[extract.rule]]
+app_name = "sshd"
+auth_action = "Accepted"
+set = { event_type = "ssh_auth_success" }
+
+[[extract.rule]]
+app_name = "sshd"
+session_action = "opened"
+set = { event_type = "ssh_session_open" }
+
+[[extract.rule]]
+app_name = "sshd"
+session_action = "closed"
+set = { event_type = "ssh_session_close" }
+
+[[extract.rule]]
+app_name = "sshd"
+conn_action = "closed"
+set = { event_type = "ssh_conn_closed" }
+
+[[extract.rule]]
+app_name = "sshd"
+sshd_invalid = "Invalid user"
+set = { event_type = "ssh_invalid_user" }
+
+[[extract.rule]]
+app_name = "sshd"
+sshd_event = "Did not receive identification string"
+set = { event_type = "ssh_scanner" }
+
+[[extract.rule]]
+app_name = "sshd"
+sshd_event = "Connection reset"
+set = { event_type = "ssh_conn_reset" }
+
+[[extract.rule]]
+app_name = "sshd"
+sshd_event = "Received disconnect"
+set = { event_type = "ssh_disconnect" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# kernel / UFW iptables  (source relabeled to "iptables" by override rule above)
+#
+# Patterns handled:
+#   [UFW BLOCK|ALLOW|AUDIT] IN=<if> ... SRC=<ip> DST=<ip> LEN=<n>
+#   ... PROTO=<proto> SPT=<port> DPT=<port> TTL=<n> ...
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "kernel"
+from = "message"
+pattern = "\[UFW (?P<ufw_action>\w+)\]"
+pattern = "SRC=(?P<src_ip>[\d.]+)"
+pattern = "DST=(?P<dst_ip>[\d.]+)"
+pattern = "SPT=(?P<src_port>\d+)"
+pattern = "DPT=(?P<dst_port>\d+)"
+pattern = "PROTO=(?P<protocol>\w+)"
+pattern = "\bIN=(?P<in_iface>[\w.]+)"
+pattern = "TTL=(?P<ttl>\d+)"
+pattern = "LEN=(?P<pkt_len>\d+)"
+
+[[extract.rule]]
+app_name = "kernel"
+ufw_action = "BLOCK"
+set = { event_type = "firewall_block" }
+
+[[extract.rule]]
+app_name = "kernel"
+ufw_action = "ALLOW"
+set = { event_type = "firewall_allow" }
+
+[[extract.rule]]
+app_name = "kernel"
+ufw_action = "AUDIT"
+set = { event_type = "firewall_audit" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sudo
+#
+# Patterns handled:
+#   <user> : TTY=<tty> ; PWD=<dir> ; USER=<target> ; COMMAND=<cmd>
+#   pam_unix(sudo:auth): authentication failure; ... user=<user>
+#   pam_unix(sudo:session): session opened for user <target> by <user>(uid=N)
+#   pam_unix(sudo:session): session closed for user <target>
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "sudo"
+from = "message"
+# Command execution — invoking user, TTY, working dir, target user, command
+pattern = "^(?P<username>\S+)\s*:\s*TTY=(?P<tty>\S+)\s*;\s*PWD=(?P<pwd>\S+)\s*;\s*USER=(?P<target_user>\S+)\s*;\s*(?P<sudo_action>COMMAND)=(?P<command>.+)$"
+# PAM auth failure: last `user=` in the line is the invoking user
+pattern = "sudo:auth\).*authentication (?P<sudo_event>failure).*\buser=(?P<username>\S+)\s*$"
+# PAM session open/close — target user (the one being switched to)
+pattern = "sudo:session\).*session (?P<session_action>opened|closed) for user (?P<target_user>\S+)"
+# Session open attribution — who invoked sudo (appears as "by user(uid=N)")
+pattern = "session opened for user \S+ by (?P<username>\S+)\("
+
+[[extract.rule]]
+app_name = "sudo"
+sudo_action = "COMMAND"
+set = { event_type = "sudo_command" }
+
+[[extract.rule]]
+app_name = "sudo"
+sudo_event = "failure"
+set = { event_type = "sudo_auth_failure" }
+
+[[extract.rule]]
+app_name = "sudo"
+session_action = "opened"
+set = { event_type = "sudo_session_open" }
+
+[[extract.rule]]
+app_name = "sudo"
+session_action = "closed"
+set = { event_type = "sudo_session_close" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# systemd
+#
+# Patterns handled:
+#   Started|Starting|Stopped|Stopping|Failed|Reloaded <unit>
+#   Started Session <id> of user <user>.
+#
+# The session_start rule runs after unit_started and overwrites event_type for
+# session events — that is intentional (set always wins, later rule wins).
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "systemd"
+from = "message"
+# Generic unit state — captures action word and unit name
+pattern = "^(?P<action>Started|Starting|Stopped|Stopping|Failed|Reloaded|Reloading) (?P<unit>.+?)(?:\.\.\.|\.)?\s*$"
+# Session fields — username and session ID (only present in session start lines)
+# [^\s.]+ stops before the sentence-ending period in "Started Session N of user X."
+pattern = "(?P<systemd_session>Session) (?P<session_id>\S+) of user (?P<username>[^\s.]+)"
+
+[[extract.rule]]
+app_name = "systemd"
+action = "Started"
+set = { event_type = "unit_started" }
+
+[[extract.rule]]
+app_name = "systemd"
+action = "Starting"
+set = { event_type = "unit_starting" }
+
+[[extract.rule]]
+app_name = "systemd"
+action = "Stopped"
+set = { event_type = "unit_stopped" }
+
+[[extract.rule]]
+app_name = "systemd"
+action = "Stopping"
+set = { event_type = "unit_stopping" }
+
+[[extract.rule]]
+app_name = "systemd"
+action = "Failed"
+set = { event_type = "unit_failed" }
+
+# Must come after unit_started so `set` overwrites event_type for session lines
+[[extract.rule]]
+app_name = "systemd"
+systemd_session = "Session"
+set = { event_type = "session_start" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sshd-session
+#
+# OpenSSH split-process variant; syslog tag is "sshd-session".
+#
+# Patterns handled:
+#   Accepted (password|publickey) for <user> from <ip> port <port> [ssh2[: <keytype> <fp>]]
+#   pam_unix(sshd:session): session (opened|closed) for user <user>
+#   Received disconnect from <ip> port <port>:N: <reason>
+#   Disconnected from user <user> <ip> port <port>
+#   Connection closed by [authenticating user <user> ]<ip> port <port> [preauth]
+#   error: connect_to <ip> port <port>: failed.       (port-forward failure)
+#   error: mm_reap: child terminated by signal <n>
+#   syslogin_perform_logout: logout() returned an error
+#   Read error from remote host <ip> port <port>: <reason>
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "sshd-session"
+from = "message"
+pattern = "^(?P<auth_action>Accepted) (?P<auth_method>\w+) for (?P<username>\S+) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+)(?: ssh2)?(?:: (?P<key_type>\S+) (?P<key_fingerprint>\S+))?"
+pattern = "pam_unix\(sshd:session\): session (?P<session_action>opened|closed) for user (?P<username>\w+)"
+pattern = "^(?P<ssh_disconnect_recv>Received disconnect) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+):\d+: (?P<disconnect_reason>.+)$"
+pattern = "^(?P<ssh_disconnected>Disconnected) from user (?P<username>\S+) (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
+pattern = "^(?P<ssh_conn_closed>Connection closed) by (?:authenticating user (?P<username>\S+) )?(?P<src_ip>[\d.]+) port (?P<src_port>\d+) \[preauth\]"
+pattern = "^error: (?P<ssh_forward_fail>connect_to) (?P<dst_ip>[\d.]+) port (?P<dst_port>\d+): failed"
+pattern = "^error: (?P<ssh_child_reap>mm_reap): child terminated by signal (?P<signal>\d+)"
+pattern = "^(?P<ssh_logout_error>syslogin_perform_logout): logout\(\) returned an error"
+pattern = "^(?P<ssh_read_error>Read error) from remote host (?P<src_ip>[\d.]+) port (?P<src_port>\d+): (?P<error_reason>.+)$"
+
+[[extract.rule]]
+app_name = "sshd-session"
+auth_action = "Accepted"
+set = { event_type = "ssh_auth_success", severity = "info" }
+
+[[extract.rule]]
+app_name = "sshd-session"
+session_action = "opened"
+set = { event_type = "ssh_session_open", severity = "info" }
+
+[[extract.rule]]
+app_name = "sshd-session"
+session_action = "closed"
+set = { event_type = "ssh_session_close", severity = "info" }
+
+[[extract.rule]]
+app_name = "sshd-session"
+ssh_disconnect_recv = "Received disconnect"
+set = { event_type = "ssh_disconnect_received", severity = "info" }
+
+[[extract.rule]]
+app_name = "sshd-session"
+ssh_disconnected = "Disconnected"
+set = { event_type = "ssh_disconnect", severity = "info" }
+
+[[extract.rule]]
+app_name = "sshd-session"
+ssh_conn_closed = "Connection closed"
+set = { event_type = "ssh_connection_closed", severity = "info" }
+
+[[extract.rule]]
+app_name = "sshd-session"
+ssh_forward_fail = "connect_to"
+set = { event_type = "ssh_forward_failure", severity = "warning" }
+
+[[extract.rule]]
+app_name = "sshd-session"
+ssh_child_reap = "mm_reap"
+set = { event_type = "ssh_child_terminated", severity = "warning" }
+
+[[extract.rule]]
+app_name = "sshd-session"
+ssh_logout_error = "syslogin_perform_logout"
+set = { event_type = "ssh_logout_error", severity = "warning" }
+
+[[extract.rule]]
+app_name = "sshd-session"
+ssh_read_error = "Read error"
+set = { event_type = "ssh_read_error", severity = "warning" }
+

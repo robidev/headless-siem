@@ -1,0 +1,11 @@
+title: Sudo Execution Monitoring
+id: 1002-sudo-execution
+status: stable
+level: low
+description: Tracks all sudo command executions
+logsource:
+  service: sudo
+detection:
+  selection:
+    _source_type: sudo
+  condition: selection

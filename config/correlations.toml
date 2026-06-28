@@ -1,0 +1,79 @@
+# correlations.toml — Cross-rule correlation patterns for headless-siem.
+#
+# Each [[rule]] defines a multi-step detection chain. When all steps are
+# satisfied within window_seconds, a correlation alert is emitted to stdout
+# (and optionally to the filesystem if --output is set).
+#
+# Fields:
+#   id             — unique identifier for this correlation rule
+#   title          — human-readable name shown in correlation alerts
+#   description    — (optional) longer explanation
+#   join_field     — event field that links steps together; looked up inside
+#                    the "event" object of each ruled alert (e.g. src_ip,
+#                    username). Steps only correlate when the join field value
+#                    matches across all alerts in the chain.
+#   window_seconds — all steps must fire within this sliding window (default 300)
+#   ordered        — if true (default), steps must fire in listed order;
+#                    if false, steps can fire in any order within the window
+#
+# Each [[rule.step]]:
+#   rule_id   — must match the `id` field in a Sigma rule under config/rules/
+#   min_count — how many times this rule must fire to satisfy the step (default 1)
+
+# ─── Credential guessing that succeeded ──────────────────────────────────────
+# SSH failures (1001-ssh-brute-force) followed by a successful login
+# (1005-ssh-login-success) from the same source IP within 5 minutes.
+# Both rules fire on sshd events; src_ip links them.
+[[rule]]
+id           = "cred-brute-force-success"
+title        = "SSH Credential Guessing Followed by Login Success"
+description  = "3+ SSH auth failures then a successful login from the same IP within 5 min — strong indicator of a guessed credential"
+window_seconds = 300
+join_field   = "src_ip"
+ordered      = true
+
+  [[rule.step]]
+  rule_id   = "1001-ssh-brute-force"
+  min_count = 3
+
+  [[rule.step]]
+  rule_id   = "1005-ssh-login-success"
+  min_count = 1
+
+# ─── Suspicious external probe followed by local privilege escalation ─────────
+# An external IP triggers the suspicious-SSH rule (1004) AND a sudo execution
+# alert fires from the same source. join_field = src_ip; because sudo logs
+# typically carry the local hostname rather than a remote IP, you may need to
+# adjust join_field or add a new Sigma rule that tags sudo events with src_ip.
+# This example demonstrates unordered (any-order) multi-rule correlation.
+[[rule]]
+id           = "external-ssh-then-sudo"
+title        = "Suspicious External SSH Probe Followed by Sudo Execution"
+description  = "External SSH and local sudo correlated on the same src_ip — possible lateral movement after external access"
+window_seconds = 600
+join_field   = "src_ip"
+ordered      = false
+
+  [[rule.step]]
+  rule_id   = "1004-suspicious-ssh"
+  min_count = 1
+
+  [[rule.step]]
+  rule_id   = "1002-sudo-execution"
+  min_count = 1
+
+# ─── High-volume sustained brute force from a single IP ──────────────────────
+# A single-step rule equivalent to the old --threshold flag: fires when the
+# same source IP triggers 10 or more brute-force alerts within 10 minutes.
+# Useful as a catch-all even without a follow-up success event.
+[[rule]]
+id           = "sustained-brute-force"
+title        = "Sustained SSH Brute Force from Single IP"
+description  = "Same external IP triggers SSH brute-force detection 10+ times within 10 minutes"
+window_seconds = 600
+join_field   = "src_ip"
+ordered      = false
+
+  [[rule.step]]
+  rule_id   = "1001-ssh-brute-force"
+  min_count = 10

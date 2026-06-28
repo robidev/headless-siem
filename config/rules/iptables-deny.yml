@@ -1,0 +1,11 @@
+title: IPTables Firewall Deny
+id: 1003-iptables-deny
+status: stable
+level: low
+description: Detects iptables/UFW deny events
+logsource:
+  service: iptables
+detection:
+  selection:
+    _source_type: iptables
+  condition: selection

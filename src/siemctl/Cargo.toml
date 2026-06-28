@@ -1,0 +1,13 @@
+[package]
+name = "siemctl"
+version = "0.1.0"
+edition = "2021"
+description = "Headless SIEM — search and management CLI"
+
+[[bin]]
+name = "siemctl"
+path = "src/main.rs"
+
+[dependencies]
+rusqlite = { version = "0.34", features = ["bundled"] }
+serde_json = "1"

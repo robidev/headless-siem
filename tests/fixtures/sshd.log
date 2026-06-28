@@ -1,0 +1,30 @@
+{"_raw":"Jun 22 08:55:03 myhost sshd[1234]: Failed password for root from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:07 myhost sshd[1234]: Failed password for root from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:12 myhost sshd[1234]: Failed password for root from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:15 myhost sshd[1234]: Failed password for admin from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:18 myhost sshd[1234]: Failed password for admin from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:20 myhost sshd[1234]: Failed password for admin from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:22 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:25 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:28 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:30 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:33 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:35 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:38 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:40 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:42 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:45 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:48 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:50 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:52 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:55:55 myhost sshd[1234]: Failed password for ubuntu from 10.0.0.5 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:56:01 myhost sshd[1234]: Accepted password for user from 192.168.1.100 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:56:05 myhost sshd[1234]: Accepted publickey for user from 192.168.1.100 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 08:56:10 myhost sshd[1235]: pam_unix(sshd:session): session opened for user user by (uid=0)","_source":"sshd"}
+{"_raw":"Jun 22 08:57:00 myhost sshd[1235]: pam_unix(sshd:session): session closed for user user","_source":"sshd"}
+{"_raw":"Jun 22 09:00:00 myhost sshd[1400]: Connection closed by authenticating user root 10.0.0.5 port 22 [preauth]","_source":"sshd"}
+{"_raw":"Jun 22 09:01:00 myhost sshd[1401]: Invalid user git from 10.0.0.6 port 22","_source":"sshd"}
+{"_raw":"Jun 22 09:01:05 myhost sshd[1401]: Failed password for invalid user git from 10.0.0.6 port 22 ssh2","_source":"sshd"}
+{"_raw":"Jun 22 09:02:00 myhost sshd[1402]: Did not receive identification string from 10.0.0.7 port 22","_source":"sshd"}
+{"_raw":"Jun 22 09:03:00 myhost sshd[1403]: Connection reset by 10.0.0.8 port 22 [preauth]","_source":"sshd"}
+{"_raw":"Jun 22 09:04:00 myhost sshd[1404]: Received disconnect from 10.0.0.9 port 22:11: Bye Bye [preauth]","_source":"sshd"}

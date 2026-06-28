@@ -1,0 +1,21 @@
+[package]
+name = "normalized"
+version = "0.1.0"
+edition = "2021"
+description = "Headless SIEM — log normalizer (stdin/UDP/TCP → time-bucketed storage)"
+
+[[bin]]
+name = "normalized"
+path = "src/main.rs"
+
+# External dependencies, kept minimal:
+#   chrono — timestamp parsing + time-bucket path construction
+#   regex  — config-driven field extraction ([[extract.rule]])
+# Everything else (parser chain, JSON, config) is hand-rolled std-only.
+[dependencies]
+chrono = "0.4"
+regex = "1"
+
+[profile.release]
+opt-level = 3
+strip = true

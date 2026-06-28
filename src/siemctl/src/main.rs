@@ -1,0 +1,1164 @@
+mod db;
+mod render;
+mod sources;
+mod time;
+
+use std::{
+    collections::HashSet,
+    fs,
+    io::{self, BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const DEFAULT_DATA_DIR: &str = "./data";
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
+        print_top_help();
+        std::process::exit(0);
+    }
+
+    let cmd = &args[0];
+    let rest = &args[1..];
+
+    let valid_fields = sources::find_sources_toml()
+        .map(|p| sources::load_valid_fields(&p))
+        .unwrap_or_default();
+
+    let rc = match cmd.as_str() {
+        "status" => run(cmd_status(rest)),
+        "search" => run(cmd_search(rest, &valid_fields)),
+        "tail" => run(cmd_tail(rest)),
+        "retention" => run(cmd_retention(rest)),
+        "dry-run" => run(cmd_dryrun(rest)),
+        "validate" => run(cmd_validate(rest)),
+        other => {
+            eprintln!("siemctl: unknown command '{other}'. Try 'siemctl --help'.");
+            1
+        }
+    };
+    std::process::exit(rc);
+}
+
+fn run(r: Result<i32>) -> i32 {
+    match r {
+        Ok(rc) => rc,
+        Err(e) => {
+            eprintln!("siemctl: {e}");
+            1
+        }
+    }
+}
+
+fn print_top_help() {
+    println!(
+        "siemctl — Headless SIEM management CLI\n\
+         \n\
+         USAGE:\n\
+         \x20 siemctl <command> [options]\n\
+         \n\
+         COMMANDS:\n\
+         \x20 status      Show data directory size, file counts, index coverage\n\
+         \x20 search      Search indexed buckets or raw JSONL (field, full-text, time-range)\n\
+         \x20 tail        Stream live events from raw JSONL files\n\
+         \x20 retention   Delete raw data older than N days\n\
+         \x20 dry-run     Test normalization + rule matching against a fixture file\n\
+         \x20 validate    Validate sources.toml and Sigma rule files\n\
+         \n\
+         Run 'siemctl <command> --help' for per-command options."
+    );
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+
+fn next_arg<'a>(it: &mut impl Iterator<Item = &'a str>, flag: &str) -> Result<&'a str> {
+    it.next()
+        .ok_or_else(|| format!("{flag} requires an argument").into())
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i + 1 < UNITS.len() {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
+}
+
+/// Locate a SIEM pipeline binary relative to siemctl's own path, then PATH.
+fn find_binary(name: &str) -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.as_path();
+        for _ in 0..6 {
+            for profile in &["debug", "release"] {
+                let c = dir.join("src").join(name).join("target").join(profile).join(name);
+                if c.is_file() {
+                    return c;
+                }
+            }
+            match dir.parent() {
+                Some(p) => dir = p,
+                None => break,
+            }
+        }
+    }
+    PathBuf::from(name)
+}
+
+/// Walk `dir` recursively, calling `f` on every `.jsonl` file.
+fn walk_jsonl(dir: &Path, f: &mut impl FnMut(&Path)) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let p = entry.path();
+        if p.is_dir() {
+            walk_jsonl(&p, f);
+        } else if p.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            f(&p);
+        }
+    }
+}
+
+/// Collect `.jsonl` files under `data_dir/raw/`, optionally filtered by
+/// source stem, and optionally limited to an hour-bucket time range.
+fn collect_raw_files(
+    data_dir: &Path,
+    source: Option<&str>,
+    after: Option<time::HourBucket>,
+    before: Option<time::HourBucket>,
+) -> Vec<PathBuf> {
+    let raw_dir = data_dir.join("raw");
+
+    if after.is_some() || before.is_some() {
+        let a = after.unwrap_or(time::HourBucket { year: 2000, month: 1, day: 1, hour: 0 });
+        let b = before.unwrap_or(time::HourBucket { year: 2099, month: 12, day: 31, hour: 23 });
+        let mut files = Vec::new();
+        for dir in time::hour_dirs_in_range(data_dir, a, b) {
+            let Ok(es) = fs::read_dir(&dir) else { continue };
+            let mut names: Vec<_> = es.flatten().collect();
+            names.sort_by_key(|e| e.file_name());
+            for entry in names {
+                let p = entry.path();
+                if p.extension().map(|e| e == "jsonl").unwrap_or(false)
+                    && stem_matches(&p, source)
+                {
+                    files.push(p);
+                }
+            }
+        }
+        return files;
+    }
+
+    let mut files = Vec::new();
+    walk_jsonl(&raw_dir, &mut |p| {
+        if stem_matches(p, source) {
+            files.push(p.to_owned());
+        }
+    });
+    files
+}
+
+fn stem_matches(path: &Path, source: Option<&str>) -> bool {
+    match source {
+        None => true,
+        Some(src) => path.file_stem().and_then(|s| s.to_str()) == Some(src),
+    }
+}
+
+// ── cmd: status ────────────────────────────────────────────────────────────
+
+fn cmd_status(args: &[String]) -> Result<i32> {
+    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
+            "--help" | "-h" => {
+                println!(
+                    "Usage: siemctl status [--data-dir DIR]\n\n\
+                     Show SIEM data directory size, source file counts, and index coverage."
+                );
+                return Ok(0);
+            }
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    if !data_dir.is_dir() {
+        return Err(format!("data directory not found: {}", data_dir.display()).into());
+    }
+
+    println!("SIEM Status — {}", data_dir.display());
+    println!("{}", "─".repeat(48));
+
+    // Total size (walk and sum)
+    let mut total_bytes = 0u64;
+    walk_jsonl(&data_dir, &mut |p| {
+        if let Ok(m) = p.metadata() {
+            total_bytes += m.len();
+        }
+    });
+    // Also count non-jsonl (index dbs, etc.)
+    let mut total_all = 0u64;
+    count_dir_size(&data_dir, &mut total_all);
+    println!("  Total size:        {}", human_bytes(total_all));
+
+    // File counts and last-modified per source
+    let raw_dir = data_dir.join("raw");
+    if raw_dir.is_dir() {
+        let mut counts: std::collections::BTreeMap<String, (usize, std::time::SystemTime)> =
+            std::collections::BTreeMap::new();
+        walk_jsonl(&raw_dir, &mut |p| {
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+            let mtime = p.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            let e = counts.entry(stem.to_string()).or_insert((0, std::time::UNIX_EPOCH));
+            e.0 += 1;
+            if mtime > e.1 {
+                e.1 = mtime;
+            }
+        });
+        if !counts.is_empty() {
+            println!("  Source file counts:");
+            for (src, (cnt, mtime)) in &counts {
+                let secs = mtime
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                println!("    {:<20} {:>5} files  last={}", src, cnt, secs);
+            }
+        }
+    }
+
+    // Index coverage
+    let idx_dir = data_dir.join("index");
+    if idx_dir.is_dir() {
+        let mut dbs: Vec<String> = fs::read_dir(&idx_dir)
+            .map(|it| {
+                it.flatten()
+                    .filter(|e| e.path().extension().map(|x| x == "db").unwrap_or(false))
+                    .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        dbs.sort();
+        println!("  Indexed buckets ({}):", dbs.len());
+        for db in &dbs {
+            println!("    {db}");
+        }
+    } else {
+        println!("  Index: (no index/ directory)");
+    }
+
+    Ok(0)
+}
+
+fn count_dir_size(dir: &Path, total: &mut u64) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            count_dir_size(&p, total);
+        } else if let Ok(m) = p.metadata() {
+            *total += m.len();
+        }
+    }
+}
+
+// ── cmd: search ────────────────────────────────────────────────────────────
+
+fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
+    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut field_arg: Option<String> = None;
+    let mut value: Option<String> = None;
+    let mut query: Option<String> = None;
+    let mut source: Option<String> = None;
+    let mut after: Option<time::HourBucket> = None;
+    let mut before: Option<time::HourBucket> = None;
+    let mut full = true;
+    let mut render_fields: Option<Vec<String>> = None;
+    let mut format = render::Format::Json;
+    let mut limit: Option<usize> = None;
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
+            "--field" | "-f" => field_arg = Some(next_arg(&mut it, arg)?.to_string()),
+            "--value" | "-v" => value = Some(next_arg(&mut it, arg)?.to_string()),
+            "--query" | "-q" => query = Some(next_arg(&mut it, arg)?.to_string()),
+            "--source" | "-s" => source = Some(next_arg(&mut it, arg)?.to_string()),
+            "--full" => full = true,
+            "--index-record" => full = false,
+            "--render" => {
+                let fields: Vec<String> = next_arg(&mut it, arg)?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                if fields.is_empty() {
+                    return Err("--render requires at least one field name".into());
+                }
+                render_fields = Some(fields);
+            }
+            "--format" => format = render::Format::parse(next_arg(&mut it, arg)?)?,
+            "--limit" | "-l" => {
+                let s = next_arg(&mut it, arg)?;
+                limit = Some(s.parse::<usize>().map_err(|_| format!("--limit: invalid number '{s}'"))?);
+            }
+            "--after" | "-a" => {
+                let s = next_arg(&mut it, arg)?;
+                after = Some(
+                    time::HourBucket::parse(s)
+                        .ok_or_else(|| format!("invalid --after '{s}' (YYYY-MM-DDTHH)"))?
+                );
+            }
+            "--before" | "-b" => {
+                let s = next_arg(&mut it, arg)?;
+                before = Some(
+                    time::HourBucket::parse(s)
+                        .ok_or_else(|| format!("invalid --before '{s}' (YYYY-MM-DDTHH)"))?
+                );
+            }
+            "--help" | "-h" => {
+                print_search_help();
+                return Ok(0);
+            }
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    if !data_dir.is_dir() {
+        return Err(format!("data directory not found: {}", data_dir.display()).into());
+    }
+
+    if let Some(fa) = &field_arg {
+        let uses_any = fa.ends_with("|any");
+        if !uses_any && value.is_none() {
+            eprint!("siemctl: --field requires --value (or use |any modifier to match any non-empty value)");
+            if !valid_fields.is_empty() {
+                let mut known: Vec<_> = valid_fields.iter().map(String::as_str).collect();
+                known.sort_unstable();
+                eprint!("\n         available fields: {}", known.join(", "));
+            }
+            eprintln!();
+            return Ok(1);
+        }
+        let filter = db::FieldFilter::parse(fa, value.as_deref().unwrap_or(""));
+        // Validate that the base field is a known indexed field
+        if !valid_fields.is_empty() && !valid_fields.contains(filter.base_field()) {
+            let mut known: Vec<_> = valid_fields.iter().map(String::as_str).collect();
+            known.sort_unstable();
+            eprintln!(
+                "siemctl: unknown field '{}'. Known fields: {}",
+                filter.base_field(),
+                known.join(", ")
+            );
+            return Ok(1);
+        }
+        let mut renderer =
+            render::Renderer::new(format, render_fields, io::BufWriter::new(io::stdout()), limit);
+        let rc = search_by_index(&data_dir, &filter, source.as_deref(), after, before, full, &mut renderer);
+        renderer.flush().ok();
+        rc
+    } else if let Some(q) = &query {
+        let mut renderer =
+            render::Renderer::new(format, render_fields, io::BufWriter::new(io::stdout()), limit);
+        let rc = search_by_grep(&data_dir, q, source.as_deref(), after, before, &mut renderer);
+        renderer.flush().ok();
+        rc
+    } else if source.is_some() || after.is_some() || before.is_some() {
+        let mut renderer =
+            render::Renderer::new(format, render_fields, io::BufWriter::new(io::stdout()), limit);
+        let rc = search_dump(&data_dir, source.as_deref(), after, before, &mut renderer);
+        renderer.flush().ok();
+        rc
+    } else {
+        eprintln!("siemctl search: specify --field/--value, --query, or --source/--after/--before");
+        print_search_help();
+        Ok(1)
+    }
+}
+
+fn print_search_help() {
+    println!(
+        "Usage: siemctl search [OPTIONS]\n\
+         \n\
+         Options:\n\
+         \x20 --data-dir DIR         Data directory (default: ./data)\n\
+         \x20 --field FIELD[|mod]    Indexed field to search (from sources.toml)\n\
+         \x20                        Modifiers: |startswith  |endswith  |contains  |cidr  |any\n\
+         \x20 --value VAL            Value to match (not needed with |any)\n\
+         \x20 --query TEXT           Full-text substring search on raw JSONL\n\
+         \x20 --source SRC           Filter by source name\n\
+         \x20 --after  YYYY-MM-DDTHH Start of time range\n\
+         \x20 --before YYYY-MM-DDTHH End of time range\n\
+         \x20 --index-record          Print only indexed fields (not the original log line)\n\
+         \x20 --full                 Alias for full-record mode (default; kept for compat)\n\
+         \x20 --limit N              Stop after N hits across all buckets/files\n\
+         \x20 --render f1,f2,...     Output only these fields, in this order\n\
+         \x20                        (default: all fields)\n\
+         \x20 --format FMT           Output format: json (default), tsv, tsv-noheader\n\
+         \x20 --help                 Show this help\n\
+         \n\
+         Examples:\n\
+         \x20 siemctl search --field src_ip --value 10.0.0.5\n\
+         \x20 siemctl search --field src_ip --value 10.0.0.5 --index-record\n\
+         \x20 siemctl search --field username|any\n\
+         \x20 siemctl search --field src_ip|cidr --value 10.0.0.0/24\n\
+         \x20 siemctl search --field event_type|startswith --value ssh\n\
+         \x20 siemctl search --query \"Failed password\" --source sshd\n\
+         \x20 siemctl search --source sshd --after 2026-06-22T08 --before 2026-06-22T10\n\
+         \x20 siemctl search --field src_ip|any --render timestamp,src_ip,username --format tsv"
+    );
+}
+
+/// Search SQLite index buckets; fall back to grep if no index exists.
+fn search_by_index<W: io::Write>(
+    data_dir: &Path,
+    filter: &db::FieldFilter,
+    source: Option<&str>,
+    after: Option<time::HourBucket>,
+    before: Option<time::HourBucket>,
+    full: bool,
+    renderer: &mut render::Renderer<W>,
+) -> Result<i32> {
+    let idx_dir = data_dir.join("index");
+    if !idx_dir.is_dir() {
+        return Err(
+            "no index directory found — run 'indexd' to build the index first, \
+             or use --query for full-text search"
+                .into(),
+        );
+    }
+
+    let mut dbs: Vec<PathBuf> = fs::read_dir(&idx_dir)?
+        .flatten()
+        .filter(|e| e.path().extension().map(|x| x == "db").unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    dbs.sort();
+
+    if dbs.is_empty() {
+        return Err(
+            "index directory exists but contains no buckets — run 'indexd' to index your logs, \
+             or use --query for full-text search"
+                .into(),
+        );
+    }
+
+    let mut total = 0usize;
+    for db_path in &dbs {
+        // Time-range filter: skip buckets outside [after, before]
+        if let Some(name) = db_path.file_name().and_then(|n| n.to_str()) {
+            if let Some(bkt) = time::HourBucket::from_filename(name) {
+                if after.map(|a| bkt < a).unwrap_or(false) {
+                    continue;
+                }
+                if before.map(|b| bkt > b).unwrap_or(false) {
+                    continue;
+                }
+            }
+        }
+
+        match db::query_bucket(db_path, filter, source, Some(data_dir), full, renderer) {
+            Ok(n) => total += n,
+            Err(e) => {
+                let msg = e.to_string();
+                // Silently skip buckets that don't have the requested column
+                if !msg.contains("no such column") && !msg.contains("no such table") {
+                    eprintln!("siemctl: {}: {e}", db_path.display());
+                }
+            }
+        }
+        if renderer.is_done() { break; }
+    }
+
+    if total == 0 {
+        eprintln!("siemctl: no matches found");
+        return Ok(1);
+    }
+    Ok(0)
+}
+
+/// Pure-Rust full-text substring search across raw JSONL files.
+fn search_by_grep<W: io::Write>(
+    data_dir: &Path,
+    query: &str,
+    source: Option<&str>,
+    after: Option<time::HourBucket>,
+    before: Option<time::HourBucket>,
+    renderer: &mut render::Renderer<W>,
+) -> Result<i32> {
+    let files = collect_raw_files(data_dir, source, after, before);
+    if files.is_empty() {
+        eprintln!("siemctl: no raw files found");
+        return Ok(1);
+    }
+
+    let mut found = false;
+    'outer: for path in &files {
+        let Ok(f) = fs::File::open(path) else { continue };
+        for line in BufReader::new(f).lines().map_while(|r| r.ok()) {
+            if line.contains(query) {
+                let _ = renderer.emit_raw_line(&line);
+                found = true;
+                if renderer.is_done() { break 'outer; }
+            }
+        }
+    }
+
+    Ok(if found { 0 } else { 1 })
+}
+
+/// Dump all events in a time range (no filtering by content).
+fn search_dump<W: io::Write>(
+    data_dir: &Path,
+    source: Option<&str>,
+    after: Option<time::HourBucket>,
+    before: Option<time::HourBucket>,
+    renderer: &mut render::Renderer<W>,
+) -> Result<i32> {
+    let files = collect_raw_files(data_dir, source, after, before);
+    if files.is_empty() {
+        eprintln!("siemctl: no files found in range");
+        return Ok(1);
+    }
+
+    'outer: for path in &files {
+        let Ok(f) = fs::File::open(path) else { continue };
+        for line in BufReader::new(f).lines().map_while(|r| r.ok()) {
+            let _ = renderer.emit_raw_line(&line);
+            if renderer.is_done() { break 'outer; }
+        }
+    }
+    Ok(0)
+}
+
+// ── cmd: tail ──────────────────────────────────────────────────────────────
+
+fn cmd_tail(args: &[String]) -> Result<i32> {
+    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut source: Option<String> = None;
+    let mut follow = true;
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
+            "--source" | "-s" => source = Some(next_arg(&mut it, arg)?.to_string()),
+            "--follow" | "-f" => follow = true,
+            "--no-follow" | "-F" => follow = false,
+            "--help" | "-h" => {
+                println!(
+                    "Usage: siemctl tail [--data-dir DIR] [--source SRC] [--no-follow]\n\n\
+                     Stream events from raw JSONL files.\n\n\
+                     Options:\n\
+                     \x20 --data-dir DIR   Data directory (default: ./data)\n\
+                     \x20 --source SRC     Restrict to this source name\n\
+                     \x20 --follow         Keep reading as new events arrive (default)\n\
+                     \x20 --no-follow      Read current files and exit"
+                );
+                return Ok(0);
+            }
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    if !data_dir.is_dir() {
+        return Err(format!("data directory not found: {}", data_dir.display()).into());
+    }
+
+    let files = collect_raw_files(&data_dir, source.as_deref(), None, None);
+    if files.is_empty() {
+        eprintln!("siemctl: no JSONL files found");
+        return Ok(1);
+    }
+
+    if !follow {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        for path in &files {
+            let Ok(f) = fs::File::open(path) else { continue };
+            for line in BufReader::new(f).lines().map_while(|r| r.ok()) {
+                let _ = writeln!(out, "{}", line);
+            }
+        }
+        return Ok(0);
+    }
+
+    // Follow mode: invoke `tail -n 0 -F <files...>` and parse the ==> headers
+    // to prefix each line with the source filename.
+    let mut child = Command::new("tail")
+        .arg("-n").arg("0")
+        .arg("-F")
+        .args(&files)
+        .stdout(Stdio::piped())
+        .spawn()?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let out = io::stdout();
+        let mut out = out.lock();
+        let mut cur_file = String::new();
+
+        for line in BufReader::new(stdout).lines().map_while(|r| r.ok()) {
+            if line.starts_with("==> ") && line.ends_with(" <==") {
+                cur_file = line[4..line.len() - 4].to_string();
+            } else if !line.is_empty() && !cur_file.is_empty() {
+                let _ = writeln!(out, "{}:{}", cur_file, line);
+            } else if !line.is_empty() {
+                let _ = writeln!(out, "{}", line);
+            }
+        }
+    }
+
+    child.wait()?;
+    Ok(0)
+}
+
+// ── cmd: retention ─────────────────────────────────────────────────────────
+
+fn cmd_retention(args: &[String]) -> Result<i32> {
+    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut days: Option<u32> = None;
+    let mut dry_run = false;
+    let mut assume_yes = false;
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
+            "--days" | "-n" => {
+                let s = next_arg(&mut it, arg)?;
+                days = Some(s.parse::<u32>().map_err(|_| format!("--days: invalid number '{s}'"))?);
+            }
+            "--dry-run" | "-D" => dry_run = true,
+            "--yes" | "--force" | "-y" => assume_yes = true,
+            "--help" | "-h" => {
+                println!(
+                    "Usage: siemctl retention --days N [--dry-run] [--yes] [--data-dir DIR]\n\n\
+                     Delete data files older than N days (raw logs and index DBs).\n\n\
+                     --days 0 deletes ALL data — raw logs and indexes. Because that is\n\
+                     irreversible it must be confirmed: answer the interactive prompt, or\n\
+                     pass --yes for non-interactive (cron) use.\n\n\
+                     Options:\n\
+                     \x20 --days N       Retention period in days (0 = wipe everything)\n\
+                     \x20 --dry-run      Print what would be deleted, without deleting\n\
+                     \x20 --yes, --force Skip the confirmation prompt (required for --days 0\n\
+                     \x20                when stdin is not a TTY)\n\
+                     \x20 --data-dir DIR Data directory (default: ./data)"
+                );
+                return Ok(0);
+            }
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    let days = days.ok_or("--days N is required")?;
+    if !data_dir.is_dir() {
+        return Err(format!("data directory not found: {}", data_dir.display()).into());
+    }
+
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(u64::from(days) * 86_400))
+        .unwrap_or(std::time::UNIX_EPOCH);
+
+    let mut old: Vec<(PathBuf, u64)> = Vec::new();
+    collect_old_files(&data_dir, cutoff, &mut old);
+
+    if old.is_empty() {
+        if days == 0 {
+            println!("No data to delete under {}.", data_dir.display());
+        } else {
+            println!("No files older than {days} days found.");
+        }
+        return Ok(0);
+    }
+
+    let total_bytes: u64 = old.iter().map(|(_, sz)| sz).sum();
+
+    if dry_run {
+        println!("DRY RUN — would delete {} file(s), {} total:", old.len(), human_bytes(total_bytes));
+        for (p, sz) in &old {
+            println!("  {:>10}  {}", human_bytes(*sz), p.display());
+        }
+        return Ok(0);
+    }
+
+    // --days 0 wipes everything (raw logs + index DBs). Require confirmation
+    // since it is irreversible: an interactive "yes", or --yes for cron use.
+    if days == 0 && !assume_yes {
+        use std::io::IsTerminal;
+        if !io::stdin().is_terminal() {
+            return Err(
+                "refusing to wipe all data non-interactively — re-run with --yes to confirm, \
+                 or --dry-run to preview"
+                    .into(),
+            );
+        }
+        print!(
+            "This will permanently delete ALL {} file(s) ({}) under {} — raw logs AND indexes.\n\
+             Type 'yes' to continue: ",
+            old.len(),
+            human_bytes(total_bytes),
+            data_dir.display()
+        );
+        io::stdout().flush().ok();
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        if !line.trim().eq_ignore_ascii_case("yes") {
+            println!("Aborted — nothing deleted.");
+            return Ok(0);
+        }
+    }
+
+    let mut deleted = 0usize;
+    for (p, _) in &old {
+        if let Err(e) = fs::remove_file(p) {
+            eprintln!("siemctl: remove {}: {e}", p.display());
+        } else {
+            deleted += 1;
+        }
+    }
+
+    // Remove now-empty directories (multiple passes until nothing changes)
+    let mut dirs_removed = 0usize;
+    loop {
+        let n = prune_empty_dirs(&data_dir);
+        dirs_removed += n;
+        if n == 0 {
+            break;
+        }
+    }
+
+    println!(
+        "Retention complete: {deleted} file(s) deleted, {}, {dirs_removed} empty dir(s) removed.",
+        human_bytes(total_bytes)
+    );
+    Ok(0)
+}
+
+fn collect_old_files(dir: &Path, cutoff: std::time::SystemTime, out: &mut Vec<(PathBuf, u64)>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_old_files(&p, cutoff, out);
+        } else if let Ok(meta) = p.metadata() {
+            if meta.modified().map(|m| m < cutoff).unwrap_or(false) {
+                out.push((p, meta.len()));
+            }
+        }
+    }
+}
+
+fn prune_empty_dirs(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            count += prune_empty_dirs(&p);
+            if fs::remove_dir(&p).is_ok() {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+// ── cmd: dry-run ───────────────────────────────────────────────────────────
+
+fn cmd_dryrun(args: &[String]) -> Result<i32> {
+    let mut file: Option<PathBuf> = None;
+    let mut source: Option<String> = None;
+    let mut config: Option<PathBuf> = None;
+    let mut rules: Option<PathBuf> = None;
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--file" | "-f" => file = Some(PathBuf::from(next_arg(&mut it, arg)?)),
+            "--source" | "-s" => source = Some(next_arg(&mut it, arg)?.to_string()),
+            "--config" | "-c" => config = Some(PathBuf::from(next_arg(&mut it, arg)?)),
+            "--rules" | "-r" => rules = Some(PathBuf::from(next_arg(&mut it, arg)?)),
+            "--help" | "-h" => {
+                println!(
+                    "Usage: siemctl dry-run --file FILE [--source SRC] [--config CFG] [--rules DIR]\n\n\
+                     Run a fixture file through normalized (and optionally ruled) in dry-run mode.\n\n\
+                     Options:\n\
+                     \x20 --file FILE     Input log file (required)\n\
+                     \x20 --source SRC    Override source label passed to normalized\n\
+                     \x20 --config CFG    Path to normalized.toml\n\
+                     \x20 --rules DIR     If set, also pipe output through ruled"
+                );
+                return Ok(0);
+            }
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    let file = file.ok_or("--file FILE is required")?;
+    if !file.is_file() {
+        return Err(format!("file not found: {}", file.display()).into());
+    }
+
+    let norm_bin = find_binary("normalized");
+    let mut norm_cmd = Command::new(&norm_bin);
+    norm_cmd.arg("--stdin").arg("--dry-run");
+    if let Some(src) = &source {
+        norm_cmd.args(["--source", src]);
+    }
+    if let Some(cfg) = &config {
+        norm_cmd.args(["--config", cfg.to_str().unwrap_or("")]);
+    }
+
+    let norm_out = norm_cmd
+        .stdin(Stdio::from(fs::File::open(&file)?))
+        .output()
+        .map_err(|e| format!("failed to run '{}': {e}", norm_bin.display()))?;
+
+    let norm_stdout = String::from_utf8_lossy(&norm_out.stdout);
+    let total = norm_stdout.lines().count();
+    let matched = norm_stdout.matches("\"_normalized\":true").count();
+    let rate = if total > 0 { matched as f64 / total as f64 * 100.0 } else { 0.0 };
+
+    println!("=== Normalization ===");
+    println!("  Lines processed: {total}");
+    println!("  Matched:         {matched}  ({rate:.1}%)");
+    println!("  Unmatched:       {}", total - matched);
+
+    if let Some(rules_dir) = &rules {
+        if !rules_dir.is_dir() {
+            return Err(format!("rules directory not found: {}", rules_dir.display()).into());
+        }
+
+        // Re-run normalized to pipe into ruled (can't re-use the first run's stdout)
+        let mut norm2 = Command::new(&norm_bin);
+        norm2.arg("--stdin").arg("--dry-run");
+        if let Some(src) = &source {
+            norm2.args(["--source", src]);
+        }
+        if let Some(cfg) = &config {
+            norm2.args(["--config", cfg.to_str().unwrap_or("")]);
+        }
+        let norm2_child = norm2
+            .stdin(Stdio::from(fs::File::open(&file)?))
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to run '{}': {e}", norm_bin.display()))?;
+
+        let ruled_bin = find_binary("ruled");
+        let ruled_out = Command::new(&ruled_bin)
+            .args(["--rules", rules_dir.to_str().unwrap_or("")])
+            .stdin(Stdio::from(norm2_child.stdout.unwrap()))
+            .output()
+            .map_err(|e| format!("failed to run '{}': {e}", ruled_bin.display()))?;
+
+        let ruled_stdout = String::from_utf8_lossy(&ruled_out.stdout);
+        let alert_count = ruled_stdout.lines().count();
+        let mut rule_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for line in ruled_stdout.lines() {
+            if let Some(i) = line.find("\"rule_id\":\"") {
+                let rest = &line[i + 11..];
+                if let Some(j) = rest.find('"') {
+                    rule_ids.insert(&rest[..j]);
+                }
+            }
+        }
+
+        println!("\n=== Rule Evaluation ===");
+        println!("  Alerts generated: {alert_count}");
+        println!("  Rules triggered:  {}", rule_ids.len());
+        for id in rule_ids {
+            println!("    {id}");
+        }
+    }
+
+    Ok(0)
+}
+
+// ── cmd: validate ──────────────────────────────────────────────────────────
+
+fn cmd_validate(args: &[String]) -> Result<i32> {
+    let mut sources_path: Option<PathBuf> = None;
+    let mut rules_dir: Option<PathBuf> = None;
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--config" | "-c" => sources_path = Some(PathBuf::from(next_arg(&mut it, arg)?)),
+            "--rules" | "-r" => rules_dir = Some(PathBuf::from(next_arg(&mut it, arg)?)),
+            "--help" | "-h" => {
+                println!(
+                    "Usage: siemctl validate --config sources.toml --rules DIR\n\n\
+                     Validate sources.toml field definitions and Sigma rule files.\n\n\
+                     Options:\n\
+                     \x20 --config FILE   Path to sources.toml (required)\n\
+                     \x20 --rules DIR     Directory containing Sigma .yml files (required)"
+                );
+                return Ok(0);
+            }
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    let sources_path = sources_path.ok_or("--config FILE is required")?;
+    let rules_dir = rules_dir.ok_or("--rules DIR is required")?;
+    if !sources_path.is_file() {
+        return Err(format!("not found: {}", sources_path.display()).into());
+    }
+    if !rules_dir.is_dir() {
+        return Err(format!("not found: {}", rules_dir.display()).into());
+    }
+
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+
+    // ── sources.toml ──────────────────────────────────────────────────
+    println!("=== sources.toml: {} ===", sources_path.display());
+    let content = fs::read_to_string(&sources_path)?;
+    let mut cur_source: Option<String> = None;
+    let mut cur_fields: Vec<String> = Vec::new();
+    let mut source_count = 0usize;
+
+    let flush = |name: &Option<String>, fields: &[String], cnt: &mut usize, errs: &mut usize| {
+        if let Some(n) = name {
+            *cnt += 1;
+            if fields.is_empty() {
+                eprintln!("  WARN [{n}] no index_fields defined");
+            } else {
+                println!("  OK   [{n}] index_fields: [{}]", fields.join(", "));
+                *errs += 0; // keep signature consistent
+            }
+        }
+    };
+
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with('#') || t.is_empty() {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("[source.") {
+            flush(&cur_source, &cur_fields, &mut source_count, &mut errors);
+            cur_source = rest.strip_suffix(']').map(|s| s.to_string());
+            cur_fields.clear();
+        } else if t.starts_with("index_fields") {
+            // Grab all quoted strings on this and potentially continued lines
+            let mut in_array = true;
+            let work = t.to_string();
+            while in_array {
+                let mut rest = work.as_str();
+                while let Some(i) = rest.find('"') {
+                    rest = &rest[i + 1..];
+                    if let Some(j) = rest.find('"') {
+                        let f = &rest[..j];
+                        if !f.is_empty() {
+                            cur_fields.push(f.to_string());
+                        }
+                        rest = &rest[j + 1..];
+                    } else {
+                        break;
+                    }
+                }
+                if work.contains(']') {
+                    in_array = false;
+                } else {
+                    break; // single-line only for now
+                }
+            }
+        }
+    }
+    flush(&cur_source, &cur_fields, &mut source_count, &mut errors);
+
+    if source_count == 0 {
+        eprintln!("  ERROR: no [source.*] entries found");
+        errors += 1;
+    } else {
+        println!("  Total: {source_count} source(s)");
+    }
+
+    // ── Sigma rules ───────────────────────────────────────────────────
+    println!("\n=== Sigma rules: {} ===", rules_dir.display());
+    let mut rule_files: Vec<PathBuf> = fs::read_dir(&rules_dir)?
+        .flatten()
+        .filter(|e| e.path().extension().map(|x| x == "yml" || x == "yaml").unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    rule_files.sort();
+
+    if rule_files.is_empty() {
+        println!("  No .yml files found.");
+    }
+
+    for rf in &rule_files {
+        let name = rf.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        let content = match fs::read_to_string(rf) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  ERROR [{name}] cannot read: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+
+        let issues = validate_sigma_rule(&content);
+        let deprecated = is_sigma_deprecated(&content);
+
+        if issues.is_empty() {
+            if deprecated {
+                println!("  SKIP [{name}] deprecated");
+                warnings += 1;
+            } else {
+                println!("  OK   [{name}]");
+            }
+        } else {
+            for issue in &issues {
+                eprintln!("  ERROR [{name}] {issue}");
+                errors += 1;
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "Validation complete: {} rule file(s), {} error(s), {} warning(s).",
+        rule_files.len(),
+        errors,
+        warnings
+    );
+    Ok(if errors > 0 { 1 } else { 0 })
+}
+
+fn validate_sigma_rule(content: &str) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    let has_id = content.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("id:") && t.len() > 3 && !t[3..].trim().is_empty()
+    });
+    if !has_id {
+        issues.push("missing 'id' field".to_string());
+    }
+
+    let has_title = content.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("title:") && t.len() > 6 && !t[6..].trim().is_empty()
+    });
+    if !has_title {
+        issues.push("missing 'title' field".to_string());
+    }
+
+    if !content.contains("detection:") {
+        issues.push("missing 'detection' block".to_string());
+    } else {
+        let has_cond = content.lines().any(|l| {
+            let stripped = l.trim_start();
+            // condition must be indented (inside detection block)
+            l.starts_with(' ') || l.starts_with('\t') && stripped.starts_with("condition:")
+        });
+        // Simpler check: just look for "condition:" anywhere indented
+        let has_cond2 = content.lines().any(|l| {
+            (l.starts_with("  ") || l.starts_with('\t'))
+                && l.trim_start().starts_with("condition:")
+        });
+        if !has_cond2 {
+            issues.push("missing 'condition' inside detection block".to_string());
+        }
+        let _ = has_cond;
+    }
+
+    issues
+}
+
+fn is_sigma_deprecated(content: &str) -> bool {
+    content.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("status:") && t.contains("deprecated")
+    })
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CTR: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir {
+        path: PathBuf,
+    }
+    impl TempDir {
+        fn new() -> Self {
+            let n = CTR.fetch_add(1, Ordering::SeqCst);
+            let p = std::env::temp_dir()
+                .join(format!("siemctl_ret_test_{}_{}", std::process::id(), n));
+            fs::create_dir_all(&p).unwrap();
+            TempDir { path: p }
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// `--days 0` computes a cutoff of "now", so every already-written file is
+    /// older and gets collected — including index DBs and their WAL/SHM
+    /// sidecars, not just raw logs. (Cutoff is taken in the future here to keep
+    /// the assertion robust against filesystem mtime granularity.)
+    #[test]
+    fn collect_old_files_zero_day_cutoff_catches_raw_and_index() {
+        let tmp = TempDir::new();
+        let raw = tmp.path.join("raw/2026/06/27/22/13/22");
+        let idx = tmp.path.join("index");
+        fs::create_dir_all(&raw).unwrap();
+        fs::create_dir_all(&idx).unwrap();
+        fs::write(raw.join("sshd.jsonl"), b"{}\n").unwrap();
+        fs::write(idx.join("2026-06-27-22.db"), b"x").unwrap();
+        fs::write(idx.join("2026-06-27-22.db-wal"), b"x").unwrap();
+
+        let cutoff = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let mut old = Vec::new();
+        collect_old_files(&tmp.path, cutoff, &mut old);
+
+        let names: Vec<String> = old
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(old.len(), 3, "expected raw + 2 index files, got: {names:?}");
+        assert!(names.iter().any(|n| n == "sshd.jsonl"), "raw log missing: {names:?}");
+        assert!(names.iter().any(|n| n == "2026-06-27-22.db"), "index db missing: {names:?}");
+        assert!(names.iter().any(|n| n == "2026-06-27-22.db-wal"), "wal sidecar missing: {names:?}");
+    }
+}

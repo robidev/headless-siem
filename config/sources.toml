@@ -1,0 +1,35 @@
+# Index field definitions — consumed by indexd and siemctl.
+# Each [source.*] entry lists which fields to extract from JSONL records
+# and store in the per-bucket SQLite index. The union of all index_fields
+# across all sources determines the SQLite schema.
+#
+# Source labels come from the normalized binary (app_name, _source_type,
+# override rules, etc.) — not from this file.
+
+[source.sshd]
+index_fields = ["src_ip", "event_type", "username"]
+
+[source.sudo]
+index_fields = ["username", "event_type"]
+
+[source.iptables]
+index_fields = ["src_ip", "dst_ip", "dst_port", "event_type"]
+
+[source.systemd]
+index_fields = ["event_type", "unit"]
+
+[source.router]
+index_fields = ["src_ip", "dst_ip", "dst_port", "event_type"]
+
+[source.unifi]
+index_fields = ["src_ip", "dst_ip", "event_type"]
+
+[source.dnsmasq]
+index_fields = ["src_ip", "query", "event_type"]
+
+[source.sshd-session]
+index_fields = ["src_ip", "src_port", "dst_ip", "dst_port", "username", "event_type", "auth_method"]
+
+# Catch-all: fields indexed when the source label doesn't match any entry above.
+[source.default]
+index_fields = ["src_ip", "dst_ip", "event_type"]

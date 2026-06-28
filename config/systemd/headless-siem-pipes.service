@@ -1,0 +1,24 @@
+[Unit]
+Description=Headless SIEM - Named Pipe Setup
+Before=headless-siem-normalized.service headless-siem-ruled.service headless-siem-correlated.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=user
+WorkingDirectory=/home/user/projects/headless-siem
+
+ExecStartPre=/usr/bin/mkdir -p /run/headless-siem
+ExecStart=/bin/sh -c '\
+  [ -p /run/headless-siem/normalized-in.pipe ]  || /usr/bin/mkfifo /run/headless-siem/normalized-in.pipe; \
+  [ -p /run/headless-siem/normalized-out.pipe ] || /usr/bin/mkfifo /run/headless-siem/normalized-out.pipe; \
+  [ -p /run/headless-siem/ruled-out.pipe ]      || /usr/bin/mkfifo /run/headless-siem/ruled-out.pipe; \
+  chmod 622 /run/headless-siem/normalized-in.pipe; \
+  chmod 644 /run/headless-siem/normalized-out.pipe /run/headless-siem/ruled-out.pipe'
+
+# normalized-in.pipe: rsyslog (root) writes, normalized (user) reads  → 622
+# normalized-out.pipe: normalized writes, ruled reads                 → 644
+# ruled-out.pipe:      ruled writes, correlated reads                 → 644
+
+[Install]
+WantedBy=multi-user.target
