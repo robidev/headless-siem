@@ -13,11 +13,15 @@ mod output;
 mod rules;
 
 const USAGE: &str = "\
-USAGE: ruled --rules <path> [--output <path>] [--help]
+USAGE: ruled --rules <path> [--output <path>] [--dedup-window <secs>] [--help]
 
-  --rules <path>   Directory containing Sigma YAML rule files
-  --output <path>  Optional output directory for filesystem alerts
-  --help           Print this help
+  --rules <path>          Directory containing Sigma YAML rule files
+  --output <path>         Optional output directory for filesystem alerts
+  --dedup-window <secs>   Suppress repeat alerts for the same (rule, key) within
+                          this many seconds (default 5). 0 disables dedup —
+                          use for batch/historical replay and to feed
+                          count-based correlation without losing volume.
+  --help                  Print this help
 
 DESCRIPTION:
   Reads JSONL events from stdin, evaluates them against loaded Sigma rules,
@@ -37,14 +41,21 @@ SIGNALS:
 
 fn main() {
     // ── Initialize structured logging ────────────────────────────────
+    // Default to INFO when RUST_LOG is unset so the operator sees the
+    // "loaded N rules" / shutdown lines; respect RUST_LOG when set
+    // (RUST_LOG=warn to quiet it, RUST_LOG=debug for more detail).
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
 
     let mut args = std::env::args().skip(1);
     let mut rules_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
+    let mut dedup_window_secs: u64 = 5;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -63,6 +74,16 @@ fn main() {
                     error!("--output requires a path argument");
                     std::process::exit(1);
                 })));
+            }
+            "--dedup-window" => {
+                let raw = args.next().unwrap_or_else(|| {
+                    error!("--dedup-window requires a value in seconds");
+                    std::process::exit(1);
+                });
+                dedup_window_secs = raw.parse().unwrap_or_else(|_| {
+                    error!("--dedup-window: invalid number of seconds: {}", raw);
+                    std::process::exit(1);
+                });
             }
             other => {
                 error!("unknown flag: {}", other);
@@ -103,7 +124,7 @@ fn main() {
     };
 
     // Alert router
-    let mut router = AlertRouter::new(output_path);
+    let mut router = AlertRouter::new(output_path, dedup_window_secs);
 
     // Signal handling
     let running = Arc::new(AtomicBool::new(true));

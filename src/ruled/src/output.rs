@@ -20,11 +20,17 @@ impl AlertRouter {
     ///
     /// If `output_dir` is Some, alerts are also written to
     /// `<output_dir>/YYYY/MM/DD/HH/alerts.jsonl`.
-    pub fn new(output_dir: Option<PathBuf>) -> Self {
+    ///
+    /// `dedup_window_secs` suppresses repeat alerts for the same
+    /// (rule_id, key) seen within that many seconds. `0` disables dedup
+    /// entirely — useful for batch/historical replay and for feeding
+    /// count-based correlation, where collapsing repeats would hide the
+    /// volume that downstream rules depend on.
+    pub fn new(output_dir: Option<PathBuf>, dedup_window_secs: u64) -> Self {
         AlertRouter {
             output_dir,
             dedup_cache: HashMap::new(),
-            dedup_window_secs: 5,
+            dedup_window_secs,
         }
     }
 
@@ -44,19 +50,22 @@ impl AlertRouter {
             .unwrap_or_default()
             .as_secs();
 
-        // Build dedup key from event's key fields
-        let dedup_key = build_dedup_key(event);
+        // Dedup, unless disabled (window 0). When disabled we skip the cache
+        // entirely so it can't grow without bound during long/batch runs.
+        if self.dedup_window_secs > 0 {
+            let dedup_key = build_dedup_key(event);
 
-        // Check dedup cache
-        if let Some(&last_seen) = self.dedup_cache.get(&(rule_id.to_string(), dedup_key.clone())) {
-            if now - last_seen < self.dedup_window_secs {
-                return Ok(false); // suppressed
+            // Check dedup cache
+            if let Some(&last_seen) = self.dedup_cache.get(&(rule_id.to_string(), dedup_key.clone())) {
+                if now - last_seen < self.dedup_window_secs {
+                    return Ok(false); // suppressed
+                }
             }
-        }
 
-        // Update cache
-        self.dedup_cache
-            .insert((rule_id.to_string(), dedup_key), now);
+            // Update cache
+            self.dedup_cache
+                .insert((rule_id.to_string(), dedup_key), now);
+        }
 
         // Build alert JSON
         let alert = serde_json::json!({
@@ -199,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_dedup_suppresses_duplicate() {
-        let mut router = AlertRouter::new(None);
+        let mut router = AlertRouter::new(None, 5);
         let event = serde_json::json!({
             "src_ip": "10.0.0.5",
             "event_type": "SSH_FAILED_PASSWORD"
@@ -224,8 +233,30 @@ mod tests {
     }
 
     #[test]
+    fn test_dedup_window_zero_disables_suppression() {
+        let mut router = AlertRouter::new(None, 0);
+        let event = serde_json::json!({
+            "src_ip": "10.0.0.5",
+            "event_type": "ssh_auth_failure"
+        });
+        let mut buf: Vec<u8> = Vec::new();
+
+        // Every emit of the identical event must be emitted when window == 0.
+        for _ in 0..5 {
+            buf.clear();
+            let emitted = router
+                .emit("rule-1", "Test Rule", "medium", &event, &mut buf)
+                .unwrap();
+            assert!(emitted, "window 0 must never suppress");
+            assert!(!buf.is_empty());
+        }
+        // Cache stays empty when dedup is disabled.
+        assert!(router.dedup_cache.is_empty());
+    }
+
+    #[test]
     fn test_dedup_different_rules_not_suppressed() {
-        let mut router = AlertRouter::new(None);
+        let mut router = AlertRouter::new(None, 5);
         let event = serde_json::json!({
             "src_ip": "10.0.0.5",
             "event_type": "SSH_FAILED_PASSWORD"
@@ -245,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_dedup_different_events_not_suppressed() {
-        let mut router = AlertRouter::new(None);
+        let mut router = AlertRouter::new(None, 5);
         let event1 = serde_json::json!({
             "src_ip": "10.0.0.5",
             "event_type": "SSH_FAILED_PASSWORD"
@@ -270,7 +301,7 @@ mod tests {
     #[test]
     fn test_filesystem_output() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut router = AlertRouter::new(Some(tmp.path().to_path_buf()));
+        let mut router = AlertRouter::new(Some(tmp.path().to_path_buf()), 5);
         let event = serde_json::json!({
             "src_ip": "10.0.0.5",
             "event_type": "SSH_FAILED_PASSWORD"

@@ -4,14 +4,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-RULED="$PROJECT_ROOT/src/ruled/target/release/ruled"
+RULED="$PROJECT_ROOT/src/ruled/target/debug/ruled"
 RULES_DIR="$PROJECT_ROOT/config/rules"
 
 if [ ! -x "$RULED" ]; then
     echo "Building ruled..."
     cd "$PROJECT_ROOT/src/ruled"
     source "$HOME/.cargo/env" 2>/dev/null || true
-    cargo build --release
+    cargo build
 fi
 
 PASS=0 FAIL=0
@@ -32,39 +32,39 @@ echo "[3] --rules required"
 
 echo "[4] loads sample rules"
 OUT=$("$RULED" --rules "$RULES_DIR" 2>&1 <<< "" || true)
-echo "$OUT" | grep -q "loaded 4 rules" && pass "loads 4 rules" || fail "loads 4 rules" "got: $OUT"
+echo "$OUT" | grep -q "loaded 5 rules" && pass "loads 5 rules" || fail "loads 5 rules" "got: $OUT"
 
 echo "[5] matches SSH failed event"
-RESULT=$(echo '{"_source_type":"sshd","event_type":"SSH_FAILED_PASSWORD","src_ip":"10.0.0.5"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
+RESULT=$(echo '{"_source_type":"sshd","event_type":"ssh_auth_failure","src_ip":"10.0.0.5"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
 echo "$RESULT" | grep -q "1001-ssh-brute-force" && pass "SSH brute force match" || fail "SSH brute force" "no match"
 echo "$RESULT" | grep -q "1004-suspicious-ssh" && fail "suspicious SSH" "should not match internal IP" || pass "suspicious SSH: internal IP filtered"
 
 echo "[6] matches external SSH failed event"
-RESULT=$(echo '{"_source_type":"sshd","event_type":"SSH_FAILED_PASSWORD","src_ip":"203.0.113.5"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
+RESULT=$(echo '{"_source_type":"sshd","event_type":"ssh_auth_failure","src_ip":"203.0.113.5"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
 echo "$RESULT" | grep -q "1004-suspicious-ssh" && pass "suspicious SSH: external IP matched" || fail "suspicious SSH" "no match for external IP"
 
 echo "[7] matches sudo command"
-RESULT=$(echo '{"_source_type":"sudo","event_type":"SUDO_COMMAND","user":"root"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
+RESULT=$(echo '{"_source_type":"sudo","event_type":"sudo_command","username":"root"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
 echo "$RESULT" | grep -q "1002-sudo-execution" && pass "sudo execution match" || fail "sudo execution" "no match"
 
 echo "[8] matches iptables deny"
-RESULT=$(echo '{"_source_type":"iptables","event_type":"IPTABLES_DENY","src_ip":"10.0.0.5"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
+RESULT=$(echo '{"_source_type":"iptables","event_type":"firewall_block","src_ip":"10.0.0.5"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
 echo "$RESULT" | grep -q "1003-iptables-deny" && pass "iptables deny match" || fail "iptables deny" "no match"
 
 echo "[9] non-matching event produces no output"
-RESULT=$(echo '{"_source_type":"systemd","event_type":"SERVICE_START"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
+RESULT=$(echo '{"_source_type":"systemd","event_type":"unit_started"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
 [ -z "$RESULT" ] && pass "non-matching: no output" || fail "non-matching" "got output: $RESULT"
 
 echo "[10] deduplication suppresses duplicates"
 # Send the same event twice — second should be suppressed
-RESULT=$(printf '%s\n%s\n' '{"_source_type":"sshd","event_type":"SSH_FAILED_PASSWORD","src_ip":"10.0.0.5"}' '{"_source_type":"sshd","event_type":"SSH_FAILED_PASSWORD","src_ip":"10.0.0.5"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
+RESULT=$(printf '%s\n%s\n' '{"_source_type":"sshd","event_type":"ssh_auth_failure","src_ip":"10.0.0.5"}' '{"_source_type":"sshd","event_type":"ssh_auth_failure","src_ip":"10.0.0.5"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
 COUNT=$(echo "$RESULT" | grep -c "1001-ssh-brute-force" || true)
 [ "$COUNT" -eq 1 ] && pass "dedup: 1 alert (not 2)" || fail "dedup" "got $COUNT alerts"
 
 echo "[11] --output writes to filesystem"
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
-echo '{"_source_type":"sshd","event_type":"SSH_FAILED_PASSWORD","src_ip":"10.0.0.5"}' | "$RULED" --rules "$RULES_DIR" --output "$TMPDIR" 2>/dev/null
+echo '{"_source_type":"sshd","event_type":"ssh_auth_failure","src_ip":"10.0.0.5"}' | "$RULED" --rules "$RULES_DIR" --output "$TMPDIR" 2>/dev/null
 # Find alerts.jsonl somewhere under TMPDIR
 FOUND=$(find "$TMPDIR" -name "alerts.jsonl" 2>/dev/null | head -1)
 [ -n "$FOUND" ] && pass "--output: alerts.jsonl created" || fail "--output" "no alerts.jsonl"

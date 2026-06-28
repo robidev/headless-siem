@@ -8,5 +8,5 @@ logsource:
 detection:
   selection:
     _source_type: sshd
-    invalid_username|contains: ""
+    event_type: ssh_auth_failure
   condition: selection

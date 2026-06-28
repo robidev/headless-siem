@@ -75,7 +75,7 @@ make run
 - **5 binaries** — `normalized`, `indexd`, `ruled`, `correlated`, and `siemctl` (all Rust) compile and run.
 - **Log normalization** — Deterministic format chain (RFC 5424/3164, JSON, CEF, LEEF, logfmt, CSV, XML, YAML, plain) with config-driven second-pass and regex extraction. Outputs timestamped `.jsonl` + `.tsv` sidecar.
 - **Indexing** — `indexd` watches the raw directory via inotify and builds per-bucket SQLite indexes on the most-queried fields.
-- **Sigma rule engine** — `ruled` evaluates 4 Sigma rules (SSH brute-force, suspicious SSH, sudo execution, iptables deny) against the normalized stream and emits alerts.
+- **Sigma rule engine** — `ruled` evaluates 5 Sigma rules (SSH brute-force, suspicious SSH, sudo execution, iptables deny, SSH login success) against the normalized stream and emits alerts. Alerts are deduplicated within a configurable window (`--dedup-window`, default 5s; `0` disables for batch replay / count-based correlation).
 - **Correlation** — `correlated` reads the alert stream and produces compound alerts from related events.
 - **CLI** — `siemctl` provides search, status, retention, and dry-run parsing.
 - **Integration tests** — 4 test scripts in `tests/integration/` exercise the full pipeline end-to-end.
@@ -83,8 +83,12 @@ make run
 
 ### In Progress / Known Gaps
 
-- **Rule coverage** — Only 4 Sigma rules shipped; needs expansion for broader threat detection.
+- **Rule coverage** — Only 5 Sigma rules shipped; needs expansion for broader threat detection.
 - **Correlation engine** — Stateful correlation is functional but the rule set is minimal; more correlation scenarios needed.
+- **Processing-time windows** — `ruled` dedup and `correlated` windows key off wall-clock
+  processing time, not event time. This is correct for a live tail. For batch/historical replay,
+  run `ruled --dedup-window 0` so repeats aren't collapsed; event-time windowing is a planned
+  follow-up.
 - **Performance tuning** — No benchmarking or throughput optimization yet.
 - **Packaging** — No system packages (`.deb`/`.rpm`) or container images; build-from-source only.
 - **Alerting** — No built-in notification channels (email, webhook, Slack); alerts are filesystem-only.

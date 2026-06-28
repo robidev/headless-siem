@@ -8,4 +8,5 @@ logsource:
 detection:
   selection:
     _source_type: iptables
+    event_type: firewall_block
   condition: selection

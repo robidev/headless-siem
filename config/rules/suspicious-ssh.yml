@@ -8,7 +8,7 @@ logsource:
 detection:
   selection:
     _source_type: sshd
-    invalid_username|contains: ""
+    event_type: ssh_auth_failure
   filter:
     src_ip|startswith: "10.0."
   condition: selection and not filter

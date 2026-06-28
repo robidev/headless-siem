@@ -19,6 +19,14 @@
 # Each [[rule.step]]:
 #   rule_id   — must match the `id` field in a Sigma rule under config/rules/
 #   min_count — how many times this rule must fire to satisfy the step (default 1)
+#
+# NOTE on min_count > 1: `ruled` deduplicates repeat alerts within its
+# --dedup-window (default 5s), so a fast burst of identical events yields a
+# single alert and won't accumulate toward a high min_count. When you rely on
+# counts (e.g. the sustained-brute-force rule below), run
+# `ruled --dedup-window 0` so every matching event produces an alert. Windows
+# here are measured in wall-clock processing time, so this also matters for
+# batch/historical replay.
 
 # ─── Credential guessing that succeeded ──────────────────────────────────────
 # SSH failures (1001-ssh-brute-force) followed by a successful login

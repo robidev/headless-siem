@@ -8,4 +8,5 @@ logsource:
 detection:
   selection:
     _source_type: sudo
+    event_type: sudo_command
   condition: selection

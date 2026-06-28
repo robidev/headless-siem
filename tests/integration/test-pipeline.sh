@@ -65,9 +65,12 @@ check "Fixture file exists" test -f "$FIXTURE"
 # ── Step 1: Normalization ─────────────────────────────────────────────
 info "=== Step 1: Normalization (normalized) ==="
 
-# Run normalized: pipe mixed.log through, write to filesystem, capture stdout
+# Run normalized: pipe mixed.log through, write to filesystem, capture stdout.
+# --config is required so the extract rules assign event_type / relabel sources;
+# without it the downstream Sigma rules (which key on event_type) match nothing.
 NORM_STDOUT="$TEST_DIR/normalized-output.jsonl"
-cat "$FIXTURE" | "$NORMALIZED" --stdin --data-dir "$TEST_DIR" > "$NORM_STDOUT" 2>/dev/null
+cat "$FIXTURE" | "$NORMALIZED" --stdin --data-dir "$TEST_DIR" \
+    --config "$PROJECT_ROOT/config/normalized.toml" > "$NORM_STDOUT" 2>/dev/null
 
 check "Normalized stdout is non-empty" test -s "$NORM_STDOUT"
 

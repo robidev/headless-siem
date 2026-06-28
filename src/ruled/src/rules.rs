@@ -6,6 +6,7 @@ use std::path::Path;
 
 /// A fully parsed Sigma rule.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Rule {
     pub id: String,
     pub title: String,
@@ -488,14 +489,12 @@ fn parse_condition(input: &str) -> Result<Condition, String> {
         return Ok(Condition::OneOfPattern(pattern.to_string()));
     }
 
-    // Try to split on "and not" (highest precedence boundary)
-    if let Some(pos) = find_outer_operator(input, "and not") {
-        let left = parse_condition(&input[..pos])?;
-        let right = parse_condition(&input[pos + 7..])?;
-        return Ok(Condition::And(Box::new(left), Box::new(Condition::Not(Box::new(right)))));
-    }
+    // Precedence (loosest first): OR binds looser than AND, AND looser than NOT.
+    // Split on the loosest operator first so it becomes the root of the tree.
+    // `x and not y` needs no special case: the " and " split yields a right side
+    // of "not y", which the `not ` prefix below turns into Not(y).
 
-    // Try to split on " or " (lowest precedence)
+    // Try to split on " or " (loosest)
     if let Some(pos) = find_outer_operator(input, " or ") {
         let left = parse_condition(&input[..pos])?;
         let right = parse_condition(&input[pos + 4..])?;
@@ -602,6 +601,39 @@ mod tests {
                 assert!(matches!(*right, Condition::Not(_)));
             }
             _ => panic!("expected And with Not"),
+        }
+    }
+
+    #[test]
+    fn test_parse_condition_and_binds_tighter_than_or() {
+        // `a or b and c` must parse as `a or (b and c)` — AND binds tighter.
+        let c = parse_condition("a or b and c").unwrap();
+        match c {
+            Condition::Or(left, right) => {
+                assert!(matches!(*left, Condition::Ref(ref s) if s == "a"));
+                assert!(matches!(*right, Condition::And(_, _)));
+            }
+            _ => panic!("expected Or(a, And(b, c)), got {:?}", c),
+        }
+    }
+
+    #[test]
+    fn test_parse_condition_or_with_and_not_precedence() {
+        // `a or b and not c` must parse as `a or (b and (not c))`, NOT
+        // `(a or b) and not c`. Regression for the old "and not" special case.
+        let c = parse_condition("a or b and not c").unwrap();
+        match c {
+            Condition::Or(left, right) => {
+                assert!(matches!(*left, Condition::Ref(ref s) if s == "a"));
+                match *right {
+                    Condition::And(l, r) => {
+                        assert!(matches!(*l, Condition::Ref(ref s) if s == "b"));
+                        assert!(matches!(*r, Condition::Not(_)));
+                    }
+                    _ => panic!("expected And(b, Not(c)) on the right"),
+                }
+            }
+            _ => panic!("expected Or at the root, got {:?}", c),
         }
     }
 

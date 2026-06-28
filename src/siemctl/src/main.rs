@@ -408,6 +408,17 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
             return Ok(1);
         }
         let filter = db::FieldFilter::parse(fa, value.as_deref().unwrap_or(""));
+        // The base field is interpolated into the SQL predicate (column names
+        // can't be bound), so reject anything that isn't a plain identifier —
+        // this guards the path even when sources.toml is absent and the
+        // valid_fields check below is skipped.
+        if !is_sql_ident(filter.base_field()) {
+            eprintln!(
+                "siemctl: invalid field name '{}' (only letters, digits and underscore allowed)",
+                filter.base_field()
+            );
+            return Ok(1);
+        }
         // Validate that the base field is a known indexed field
         if !valid_fields.is_empty() && !valid_fields.contains(filter.base_field()) {
             let mut known: Vec<_> = valid_fields.iter().map(String::as_str).collect();
