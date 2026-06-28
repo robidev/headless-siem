@@ -6,7 +6,17 @@ use std::{
 /// Parse `sources.toml` and return the union of all `index_fields` values,
 /// plus a hard-coded set of always-valid fields present in every bucket.
 pub fn load_valid_fields(path: &Path) -> HashSet<String> {
-    let mut fields: HashSet<String> = always_valid();
+    let mut fields = always_valid();
+    fields.extend(load_index_fields(path));
+    fields
+}
+
+/// Parse `sources.toml` and return only the *declared* `index_fields` union —
+/// without the always-valid core fields that [`load_valid_fields`] seeds in.
+/// Used by the `validate` cross-check to reason about what was explicitly
+/// configured for indexing.
+pub fn load_index_fields(path: &Path) -> HashSet<String> {
+    let mut fields: HashSet<String> = HashSet::new();
     let Ok(content) = std::fs::read_to_string(path) else {
         return fields;
     };
@@ -42,7 +52,10 @@ pub fn load_valid_fields(path: &Path) -> HashSet<String> {
     fields
 }
 
-fn always_valid() -> HashSet<String> {
+/// Fields that are always present in every index bucket regardless of
+/// `sources.toml`, so they are always searchable and never count as
+/// "unindexed" in the validate cross-check.
+pub fn always_valid() -> HashSet<String> {
     ["timestamp", "source", "src_ip", "dst_ip", "src_port", "dst_port",
      "event_type", "username", "severity"]
         .iter()

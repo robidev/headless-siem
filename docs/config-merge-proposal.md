@@ -154,6 +154,10 @@ The legitimate pain a merge is *trying* to solve is a silent mismatch:
 
 Merging does **not** cleanly fix this (mismatched keys). A targeted check does.
 
+> **Status: implemented.** `siemctl validate --normalized-config <normalized.toml>`
+> now performs this cross-check (see below). It is opt-in (omitting the flag
+> preserves the previous behavior) and advisory (it never changes the exit code).
+
 **Recommendation:** extend `siemctl validate` (which already validates
 `sources.toml` and the Sigma rules) with an optional cross-check against
 `normalized.toml`:
@@ -169,6 +173,17 @@ Merging does **not** cleanly fix this (mismatched keys). A targeted check does.
 
 This is advisory, opt-in, and keeps the files — and their failure domains —
 separate while delivering the safety net that motivated the merge idea.
+
+Run it with:
+
+```bash
+siemctl validate --config config/sources.toml --rules config/rules \
+  --normalized-config config/normalized.toml
+```
+
+Internal/discriminator captures (those consumed only as a later rule's match
+condition, e.g. `auth_action`) are excluded from the "producible output fields"
+so they aren't mistaken for searchable telemetry.
 
 ---
 

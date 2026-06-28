@@ -1,4 +1,5 @@
 mod db;
+mod normconfig;
 mod render;
 mod sources;
 mod time;
@@ -1047,19 +1048,28 @@ fn cmd_dryrun(args: &[String]) -> Result<i32> {
 fn cmd_validate(args: &[String]) -> Result<i32> {
     let mut sources_path: Option<PathBuf> = None;
     let mut rules_dir: Option<PathBuf> = None;
+    let mut normalized_path: Option<PathBuf> = None;
 
     let mut it = args.iter().map(String::as_str);
     while let Some(arg) = it.next() {
         match arg {
             "--config" | "-c" => sources_path = Some(PathBuf::from(next_arg(&mut it, arg)?)),
             "--rules" | "-r" => rules_dir = Some(PathBuf::from(next_arg(&mut it, arg)?)),
+            "--normalized-config" | "-N" => {
+                normalized_path = Some(PathBuf::from(next_arg(&mut it, arg)?))
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: siemctl validate --config sources.toml --rules DIR\n\n\
-                     Validate sources.toml field definitions and Sigma rule files.\n\n\
+                    "Usage: siemctl validate --config sources.toml --rules DIR \
+                     [--normalized-config normalized.toml]\n\n\
+                     Validate sources.toml field definitions and Sigma rule files.\n\
+                     With --normalized-config, also cross-check that the fields\n\
+                     normalized extracts line up with the fields sources.toml indexes.\n\n\
                      Options:\n\
-                     \x20 --config FILE   Path to sources.toml (required)\n\
-                     \x20 --rules DIR     Directory containing Sigma .yml files (required)"
+                     \x20 --config FILE             Path to sources.toml (required)\n\
+                     \x20 --rules DIR               Directory containing Sigma .yml files (required)\n\
+                     \x20 --normalized-config FILE  Path to normalized.toml (optional; enables\n\
+                     \x20                           the field cross-check, advisory only)"
                 );
                 return Ok(0);
             }
@@ -1077,6 +1087,11 @@ fn cmd_validate(args: &[String]) -> Result<i32> {
     }
     if !rules_dir.is_dir() {
         return Err(format!("not found: {}", rules_dir.display()).into());
+    }
+    if let Some(np) = &normalized_path {
+        if !np.is_file() {
+            return Err(format!("not found: {}", np.display()).into());
+        }
     }
 
     let mut errors = 0usize;
@@ -1187,6 +1202,11 @@ fn cmd_validate(args: &[String]) -> Result<i32> {
         }
     }
 
+    // ── Cross-check: normalized.toml ↔ sources.toml (advisory) ────────
+    if let Some(np) = &normalized_path {
+        validate_config_crosscheck(np, &sources_path);
+    }
+
     println!();
     println!(
         "Validation complete: {} rule file(s), {} error(s), {} warning(s).",
@@ -1195,6 +1215,68 @@ fn cmd_validate(args: &[String]) -> Result<i32> {
         warnings
     );
     Ok(if errors > 0 { 1 } else { 0 })
+}
+
+/// Advisory cross-check between what `normalized` extracts and what
+/// `sources.toml` indexes. Prints findings only; never affects the exit code,
+/// because a config scan can't see fields produced by the zero-config format
+/// chain (CEF/LEEF/JSON/…), so both directions can have false positives.
+fn validate_config_crosscheck(normalized_path: &Path, sources_path: &Path) {
+    println!(
+        "\n=== config cross-check: {} ↔ {} ===",
+        normalized_path.display(),
+        sources_path.display()
+    );
+
+    let prod = match normconfig::load(normalized_path) {
+        Some(p) => p,
+        None => {
+            eprintln!("  WARN: could not read {}", normalized_path.display());
+            return;
+        }
+    };
+    let declared = sources::load_index_fields(sources_path);
+    let core = sources::always_valid();
+
+    println!("  declared index_fields (union): {}", declared.len());
+    println!("  producible output fields:      {}", prod.output_fields.len());
+
+    // Direction 1: produced by normalized but indexed by no source → not searchable.
+    let mut gap: Vec<&String> = prod
+        .output_fields
+        .iter()
+        .filter(|f| !declared.contains(*f) && !core.contains(*f))
+        .collect();
+    gap.sort();
+    if gap.is_empty() {
+        println!("  OK   every producible output field is indexed (or is a core field)");
+    } else {
+        println!("  WARN produced but indexed by no source ({}):", gap.len());
+        println!("         {}", join_refs(&gap));
+        println!("       → add to a source's index_fields in sources.toml to search/group on them");
+    }
+
+    // Direction 2: declared index_field that no rule produces → typo or
+    // structured-format-only field.
+    let mut dead: Vec<&String> = declared
+        .iter()
+        .filter(|f| !prod.all_fields.contains(*f) && !core.contains(*f))
+        .collect();
+    dead.sort();
+    if dead.is_empty() {
+        println!("  OK   every declared index_field is produced by a rule (or is a core field)");
+    } else {
+        println!("  WARN index_fields not produced by any normalized.toml rule ({}):", dead.len());
+        println!("         {}", join_refs(&dead));
+        println!("       → check for a typo, or a field supplied by a structured-format");
+        println!("         parser (CEF/LEEF/JSON) that this config scan can't see");
+    }
+
+    println!("  (advisory — these findings do not affect the exit code)");
+}
+
+fn join_refs(v: &[&String]) -> String {
+    v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
 }
 
 fn validate_sigma_rule(content: &str) -> Vec<String> {
