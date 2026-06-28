@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
 
 /// How often the initial scan logs an aggregate progress line.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
@@ -40,8 +39,8 @@ impl ScanProgress {
         self.events += indexed;
         self.skipped += skipped;
         if self.last_log.elapsed() >= PROGRESS_INTERVAL {
-            info!(
-                "progress: {} files, {} events indexed, {} skipped ({:.0}s elapsed)",
+            eprintln!(
+                "[indexd] progress: {} files, {} events indexed, {} skipped ({:.0}s elapsed)",
                 self.files,
                 self.events,
                 self.skipped,
@@ -53,8 +52,8 @@ impl ScanProgress {
 
     /// Emit a final summary line for the scan.
     fn finish(&self) {
-        info!(
-            "scan complete: {} files, {} events indexed, {} skipped in {:.1}s",
+        eprintln!(
+            "[indexd] scan complete: {} files, {} events indexed, {} skipped in {:.1}s",
             self.files,
             self.events,
             self.skipped,
@@ -206,18 +205,6 @@ fn find_project_root() -> Option<PathBuf> {
 }
 
 fn main() {
-    // ── Initialize structured logging ────────────────────────────────
-    // Default to INFO when RUST_LOG is unset so the operator sees scan
-    // progress; respect RUST_LOG when it is set (e.g. RUST_LOG=debug for
-    // per-file detail, RUST_LOG=warn for quiet).
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     // ── Parse command-line arguments ─────────────────────────────────
     let mut data_dir = PathBuf::from("data");
     let mut config_path: Option<String> = None;
@@ -247,8 +234,8 @@ fn main() {
                 std::process::exit(0);
             }
             other => {
-                error!("unknown flag: {}", other);
-                error!("use --help for usage");
+                eprintln!("[indexd] unknown flag: {}", other);
+                eprintln!("[indexd] use --help for usage");
                 std::process::exit(1);
             }
         }
@@ -258,24 +245,24 @@ fn main() {
     if clear {
         match clear_indexes(&data_dir) {
             Ok(count) => {
-                info!("cleared {} index file(s)", count);
+                eprintln!("[indexd] cleared {} index file(s)", count);
                 std::process::exit(0);
             }
             Err(e) => {
-                error!("failed to clear indexes: {}", e);
+                eprintln!("[indexd] failed to clear indexes: {}", e);
                 std::process::exit(1);
             }
         }
     }
 
     if reindex_all {
-        info!("re-indexing all logs (this may take a while)...");
+        eprintln!("[indexd] re-indexing all logs (this may take a while)...");
         match clear_indexes(&data_dir) {
             Ok(count) => {
-                info!("cleared {} index file(s)", count);
+                eprintln!("[indexd] cleared {} index file(s)", count);
             }
             Err(e) => {
-                error!("failed to clear indexes: {}", e);
+                eprintln!("[indexd] failed to clear indexes: {}", e);
                 std::process::exit(1);
             }
         }
@@ -285,8 +272,8 @@ fn main() {
     // ── Load config ──────────────────────────────────────────────────
     let config_path = config_path.unwrap_or_else(|| {
         let root = find_project_root().unwrap_or_else(|| {
-            error!("could not find project root (config/sources.toml)");
-            error!("set HEADLESS_SIEM_ROOT or use --config");
+            eprintln!("[indexd] could not find project root (config/sources.toml)");
+            eprintln!("[indexd] set HEADLESS_SIEM_ROOT or use --config");
             std::process::exit(1);
         });
         root.join("config").join("sources.toml")
@@ -296,13 +283,13 @@ fn main() {
     });
 
     let siem_config = config::Config::load(&config_path).unwrap_or_else(|e| {
-        error!("failed to load config {}: {}", config_path, e);
+        eprintln!("[indexd] failed to load config {}: {}", config_path, e);
         std::process::exit(1);
     });
 
     let index_fields = siem_config.all_index_fields();
-    info!(
-        "loaded config with {} index fields: {:?}",
+    eprintln!(
+        "[indexd] loaded config with {} index fields: {:?}",
         index_fields.len(),
         index_fields
     );
@@ -314,21 +301,21 @@ fn main() {
     // so we use a `shutdown` flag (false = keep running, true = stop).
     let shutdown = Arc::new(AtomicBool::new(false));
     if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown)) {
-        warn!("failed to register SIGTERM handler: {}", e);
+        eprintln!("[indexd] failed to register SIGTERM handler: {}", e);
     }
     if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown)) {
-        warn!("failed to register SIGINT handler: {}", e);
+        eprintln!("[indexd] failed to register SIGINT handler: {}", e);
     }
 
     // ── Ensure raw directory exists ──────────────────────────────────
     if !raw_dir.exists() {
-        warn!("raw directory does not exist: {}", raw_dir.display());
-        info!("waiting for normalized to create it...");
+        eprintln!("[indexd] raw directory does not exist: {}", raw_dir.display());
+        eprintln!("[indexd] waiting for normalized to create it...");
     }
 
     // ── Initialize inotify ───────────────────────────────────────────
     let mut inotify = Inotify::init().unwrap_or_else(|e| {
-        error!("failed to initialize inotify: {}", e);
+        eprintln!("[indexd] failed to initialize inotify: {}", e);
         std::process::exit(1);
     });
 
@@ -343,13 +330,13 @@ fn main() {
         match newest {
             None => {
                 // No index yet — full scan, same as --reindex-all
-                info!("no existing index found — scanning all raw logs");
+                eprintln!("[indexd] no existing index found — scanning all raw logs");
                 let mut progress = ScanProgress::new();
                 scan_existing(&index_db, &raw_dir, &data_dir, &shutdown, &mut progress);
                 progress.finish();
             }
             Some(ref bucket) => {
-                info!("newest indexed bucket: {} — scanning from there", bucket);
+                eprintln!("[indexd] newest indexed bucket: {} — scanning from there", bucket);
                 let hour_dirs = collect_hour_dirs(&raw_dir);
                 let eligible: Vec<_> = hour_dirs
                     .iter()
@@ -357,7 +344,7 @@ fn main() {
                     .collect();
 
                 if eligible.is_empty() {
-                    info!("nothing new to index");
+                    eprintln!("[indexd] nothing new to index");
                 } else {
                     // Only clear the boundary bucket if its raw hour dir still exists.
                     // Skipping the clear when raw files are gone avoids wiping index
@@ -365,27 +352,27 @@ fn main() {
                     let boundary_has_raw = eligible.iter().any(|(b, _)| b == bucket);
                     if boundary_has_raw {
                         if let Err(e) = clear_bucket(&index_dir, bucket) {
-                            error!("failed to clear boundary bucket {}: {}", bucket, e);
+                            eprintln!("[indexd] failed to clear boundary bucket {}: {}", bucket, e);
                             std::process::exit(1);
                         }
-                        info!("cleared boundary bucket {} for clean re-index", bucket);
+                        eprintln!("[indexd] cleared boundary bucket {} for clean re-index", bucket);
                     }
                     let mut progress = ScanProgress::new();
                     for (b, dir) in &eligible {
                         if shutdown.load(Ordering::Relaxed) {
                             break;
                         }
-                        info!("indexing hour: {}", b);
+                        eprintln!("[indexd] indexing hour: {}", b);
                         scan_existing(&index_db, dir, &data_dir, &shutdown, &mut progress);
                     }
                     progress.finish();
-                    info!("reindex-new: processed {} hour bucket(s)", eligible.len());
+                    eprintln!("[indexd] reindex-new: processed {} hour bucket(s)", eligible.len());
                 }
             }
         }
 
         index_db.close_all();
-        info!("reindex-new complete");
+        eprintln!("[indexd] reindex-new complete");
         std::process::exit(0);
     }
 
@@ -395,13 +382,13 @@ fn main() {
         add_recursive_watches(&mut inotify, &raw_dir, watch_mask);
     } else if data_dir.exists() {
         inotify.watches().add(&data_dir, WatchMask::CREATE).unwrap_or_else(|e| {
-            error!("failed to watch {}: {}", data_dir.display(), e);
+            eprintln!("[indexd] failed to watch {}: {}", data_dir.display(), e);
             std::process::exit(1);
         });
     }
 
     // ── Initial scan ──────────────────────────────────────────────────
-    info!("scanning existing files in {}", raw_dir.display());
+    eprintln!("[indexd] scanning existing files in {}", raw_dir.display());
     let mut progress = ScanProgress::new();
     scan_existing(&index_db, &raw_dir, &data_dir, &shutdown, &mut progress);
     progress.finish();
@@ -409,25 +396,25 @@ fn main() {
     // ── Exit after scan for one-shot flags ──────────────────────────
     if reindex_all {
         index_db.close_all();
-        info!("re-indexing complete");
+        eprintln!("[indexd] re-indexing complete");
         std::process::exit(0);
     }
     if no_watch {
         index_db.close_all();
-        info!("initial indexing complete");
+        eprintln!("[indexd] initial indexing complete");
         std::process::exit(0);
     }
 
     // A signal during the initial scan stops it early; exit instead of
     // dropping into the watch loop.
     if shutdown.load(Ordering::Relaxed) {
-        info!("shutdown requested during initial scan — exiting");
+        eprintln!("[indexd] shutdown requested during initial scan — exiting");
         index_db.close_all();
         std::process::exit(0);
     }
 
-    info!("watching {} for new .jsonl files", raw_dir.display());
-    info!("send SIGTERM or SIGINT to stop");
+    eprintln!("[indexd] watching {} for new .jsonl files", raw_dir.display());
+    eprintln!("[indexd] send SIGTERM or SIGINT to stop");
 
     // ── Buffer for inotify events ────────────────────────────────────
     let mut buffer = [0u8; 4096];
@@ -451,7 +438,7 @@ fn main() {
                 continue;
             }
             Err(e) => {
-                error!("inotify read error: {}", e);
+                eprintln!("[indexd] inotify read error: {}", e);
                 break;
             }
         };
@@ -462,7 +449,7 @@ fn main() {
                     let new_dir = raw_dir.join(name);
                     if new_dir.exists() {
                         add_recursive_watches(&mut inotify, &new_dir, watch_mask);
-                        info!("watching new directory: {}", new_dir.display());
+                        eprintln!("[indexd] watching new directory: {}", new_dir.display());
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         let mut progress = ScanProgress::new();
                         scan_existing(&index_db, &new_dir, &data_dir, &shutdown, &mut progress);
@@ -478,17 +465,17 @@ fn main() {
                     let path_str = name.to_string_lossy();
                     if path_str.ends_with(".jsonl") {
                         let full_path = reconstruct_path(&raw_dir, &event, name);
-                        info!("indexing: {}", full_path.display());
+                        eprintln!("[indexd] indexing: {}", full_path.display());
                         match parser::index_file(&index_db, &full_path, &data_dir, 100) {
                             Ok((indexed, skipped)) => {
-                                info!(
-                                    "indexed {} events, skipped {} lines",
+                                eprintln!(
+                                    "[indexd] indexed {} events, skipped {} lines",
                                     indexed, skipped
                                 );
                             }
                             Err(e) => {
-                                error!(
-                                    "failed to index {}: {}",
+                                eprintln!(
+                                    "[indexd] failed to index {}: {}",
                                     full_path.display(),
                                     e
                                 );
@@ -501,7 +488,7 @@ fn main() {
         }
     }
 
-    info!("shutting down gracefully");
+    eprintln!("[indexd] shutting down gracefully");
     index_db.close_all();
 }
 
@@ -530,14 +517,12 @@ fn scan_existing(
             if path.is_dir() {
                 scan_existing(index_db, &path, data_dir, shutdown, progress);
             } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                debug!("indexing existing: {}", path.display());
                 match parser::index_file(index_db, &path, data_dir, 100) {
                     Ok((indexed, skipped)) => {
-                        debug!("indexed {} events, skipped {} lines", indexed, skipped);
                         progress.record(indexed, skipped);
                     }
                     Err(e) => {
-                        error!("failed to index {}: {}", path.display(), e);
+                        eprintln!("[indexd] failed to index {}: {}", path.display(), e);
                     }
                 }
             }
@@ -548,7 +533,7 @@ fn scan_existing(
 /// Add recursive inotify watches for a directory tree.
 fn add_recursive_watches(inotify: &mut Inotify, dir: &Path, mask: WatchMask) {
     if let Err(e) = inotify.watches().add(dir, mask) {
-        warn!("failed to watch {}: {}", dir.display(), e);
+        eprintln!("[indexd] failed to watch {}: {}", dir.display(), e);
         return;
     }
     if let Ok(entries) = std::fs::read_dir(dir) {

@@ -8,7 +8,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tracing::{error, info, warn};
 
 mod config;
 mod correlation;
@@ -52,11 +51,6 @@ SIGNALS:
 ";
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     let mut config_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
@@ -69,19 +63,19 @@ fn main() {
             }
             "--config" => {
                 config_path = Some(PathBuf::from(args.next().unwrap_or_else(|| {
-                    error!("--config requires a path argument");
+                    eprintln!("[correlated] --config requires a path argument");
                     std::process::exit(1);
                 })));
             }
             "--output" => {
                 output_path = Some(PathBuf::from(args.next().unwrap_or_else(|| {
-                    error!("--output requires a path argument");
+                    eprintln!("[correlated] --output requires a path argument");
                     std::process::exit(1);
                 })));
             }
             other => {
-                error!("unknown flag: {}", other);
-                error!("use --help for usage");
+                eprintln!("[correlated] unknown flag: {}", other);
+                eprintln!("[correlated] use --help for usage");
                 std::process::exit(1);
             }
         }
@@ -90,23 +84,23 @@ fn main() {
     let corr_config = match config_path {
         Some(ref path) => {
             config::CorrelationConfig::load(path).unwrap_or_else(|e| {
-                error!("failed to load correlation config {}: {}", path.display(), e);
+                eprintln!("[correlated] failed to load correlation config {}: {}", path.display(), e);
                 std::process::exit(1);
             })
         }
         None => {
-            info!("no --config provided; running in passthrough mode (no correlations evaluated)");
+            eprintln!("[correlated] no --config provided; running in passthrough mode (no correlations evaluated)");
             config::CorrelationConfig::empty()
         }
     };
 
-    info!(
-        "loaded {} correlation rule(s)",
+    eprintln!(
+        "[correlated] loaded {} correlation rule(s)",
         corr_config.rules.len()
     );
     for rule in &corr_config.rules {
-        info!(
-            "  rule '{}': {} step(s), join_field={}, window={}s, ordered={}",
+        eprintln!(
+            "[correlated]   rule '{}': {} step(s), join_field={}, window={}s, ordered={}",
             rule.id,
             rule.steps.len(),
             rule.join_field,
@@ -122,7 +116,7 @@ fn main() {
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     let mut signals =
-        Signals::new([SIGTERM, SIGINT]).expect("correlated: failed to register signal handlers");
+        Signals::new([SIGTERM, SIGINT]).expect("[correlated] failed to register signal handlers");
     std::thread::spawn(move || {
         if signals.forever().next().is_some() {
             r.store(false, Ordering::SeqCst);
@@ -136,14 +130,14 @@ fn main() {
 
     for line_result in reader.lines() {
         if !running.load(Ordering::SeqCst) {
-            info!("received signal, shutting down");
+            eprintln!("[correlated] received signal, shutting down");
             break;
         }
 
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
-                warn!("read error: {}", e);
+                eprintln!("[correlated] read error: {}", e);
                 break;
             }
         };
@@ -155,7 +149,7 @@ fn main() {
         let alert: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                warn!("skipping malformed JSON: {}", e);
+                eprintln!("[correlated] skipping malformed JSON: {}", e);
                 continue;
             }
         };
@@ -164,17 +158,17 @@ fn main() {
         for corr in engine.feed(&alert) {
             let corr_line = serde_json::to_string(&corr).unwrap();
             if let Err(e) = router.emit(&corr_line, &mut out) {
-                error!("output error: {}", e);
+                eprintln!("[correlated] output error: {}", e);
                 break;
             }
         }
 
         // Pass the original alert through to stdout.
         if let Err(e) = writeln!(out, "{}", line) {
-            error!("stdout write error: {}", e);
+            eprintln!("[correlated] stdout write error: {}", e);
             break;
         }
     }
 
-    info!("shutdown complete");
+    eprintln!("[correlated] shutdown complete");
 }

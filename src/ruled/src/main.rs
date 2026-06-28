@@ -7,7 +7,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tracing::{error, info, warn};
 
 mod output;
 mod rules;
@@ -40,18 +39,6 @@ SIGNALS:
 ";
 
 fn main() {
-    // ── Initialize structured logging ────────────────────────────────
-    // Default to INFO when RUST_LOG is unset so the operator sees the
-    // "loaded N rules" / shutdown lines; respect RUST_LOG when set
-    // (RUST_LOG=warn to quiet it, RUST_LOG=debug for more detail).
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let mut args = std::env::args().skip(1);
     let mut rules_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
@@ -65,43 +52,43 @@ fn main() {
             }
             "--rules" => {
                 rules_path = Some(PathBuf::from(args.next().unwrap_or_else(|| {
-                    error!("--rules requires a path argument");
+                    eprintln!("[ruled] --rules requires a path argument");
                     std::process::exit(1);
                 })));
             }
             "--output" => {
                 output_path = Some(PathBuf::from(args.next().unwrap_or_else(|| {
-                    error!("--output requires a path argument");
+                    eprintln!("[ruled] --output requires a path argument");
                     std::process::exit(1);
                 })));
             }
             "--dedup-window" => {
                 let raw = args.next().unwrap_or_else(|| {
-                    error!("--dedup-window requires a value in seconds");
+                    eprintln!("[ruled] --dedup-window requires a value in seconds");
                     std::process::exit(1);
                 });
                 dedup_window_secs = raw.parse().unwrap_or_else(|_| {
-                    error!("--dedup-window: invalid number of seconds: {}", raw);
+                    eprintln!("[ruled] --dedup-window: invalid number of seconds: {}", raw);
                     std::process::exit(1);
                 });
             }
             other => {
-                error!("unknown flag: {}", other);
-                error!("use --help for usage");
+                eprintln!("[ruled] unknown flag: {}", other);
+                eprintln!("[ruled] use --help for usage");
                 std::process::exit(1);
             }
         }
     }
 
     let rules_path = rules_path.unwrap_or_else(|| {
-        error!("--rules <path> is required");
-        error!("use --help for usage");
+        eprintln!("[ruled] --rules <path> is required");
+        eprintln!("[ruled] use --help for usage");
         std::process::exit(1);
     });
 
     if !rules_path.is_dir() {
-        error!(
-            "rules path does not exist or is not a directory: {}",
+        eprintln!(
+            "[ruled] rules path does not exist or is not a directory: {}",
             rules_path.display()
         );
         std::process::exit(1);
@@ -110,15 +97,15 @@ fn main() {
     // Load rules
     let rule_set = match rules::load_rules(&rules_path) {
         Ok(rs) => {
-            info!(
-                "loaded {} rules from {}",
+            eprintln!(
+                "[ruled] loaded {} rules from {}",
                 rs.len(),
                 rules_path.display()
             );
             rs
         }
         Err(e) => {
-            error!("failed to load rules: {}", e);
+            eprintln!("[ruled] failed to load rules: {}", e);
             std::process::exit(1);
         }
     };
@@ -129,7 +116,7 @@ fn main() {
     // Signal handling
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
-    let mut signals = Signals::new([SIGTERM, SIGINT]).expect("ruled: failed to register signal handler");
+    let mut signals = Signals::new([SIGTERM, SIGINT]).expect("[ruled] failed to register signal handler");
     std::thread::spawn(move || {
         if signals.forever().next().is_some() {
             r.store(false, Ordering::SeqCst);
@@ -144,14 +131,14 @@ fn main() {
 
     for line_result in reader.lines() {
         if !running.load(Ordering::SeqCst) {
-            info!("received signal, shutting down");
+            eprintln!("[ruled] received signal, shutting down");
             break;
         }
 
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
-                warn!("read error: {}", e);
+                eprintln!("[ruled] read error: {}", e);
                 break;
             }
         };
@@ -163,7 +150,7 @@ fn main() {
         let event: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                warn!("skipping malformed JSON: {}", e);
+                eprintln!("[ruled] skipping malformed JSON: {}", e);
                 continue;
             }
         };
@@ -183,5 +170,5 @@ fn main() {
     }
 
     router.flush();
-    info!("shutdown complete");
+    eprintln!("[ruled] shutdown complete");
 }
