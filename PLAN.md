@@ -20,7 +20,7 @@ Foundation-first so output-layer tasks don't get reworked:
 | T8 | siemctl output/render layer (`--render`, `--format`) | **opus** | high | — (foundation) |
 | T1 | siemctl: make full record the default (`--index-record`) | **sonnet** | low | T8 | ✓ |
 | T5 | siemctl `--limit N` | **sonnet** | med | T8 | ✓ |
-| T7 | siemctl `--group f1,f2` with counts | **opus** | high | T8 |
+| T7 | siemctl `--group f1,f2` with counts | **opus** | high | T8 | ✓ |
 | T2 | merge sources.toml + normalized.toml (design doc) | **opus** | med | — |
 
 T4, T3, T6, T2 are independent and can be done in any order. T1/T5/T7 all sit on
@@ -166,21 +166,30 @@ no-ops once limit is reached (skipped TSV lines don't count against the limit).
 file-scan loops in `search_by_grep` and `search_dump`; checked per-bucket in
 `search_by_index` to stop scanning DBs early. 3 new render tests. 35 tests pass.
 
-## T7 — siemctl `--group f1,f2`  (opus, high)  `[ ]`
+## T7 — siemctl `--group f1,f2`  (opus, high)  `[x]`
 NOTES: "--group src_ip ... unique src_ip per line + count ... also --group src_ip,dst_ip"
 
-- Add `--group <comma-list>`; validate every field is a known **indexed** field
-  (reuse `valid_fields`), else error (free-text grouping not supported).
-- Buckets are separate SQLite DBs, so per-bucket `SELECT f1,f2,COUNT(*) GROUP BY
-  f1,f2` then **merge counts in Rust** across buckets via a
-  `BTreeMap<Vec<String>, u64>`.
-- Output through the T8 Renderer: columns = group fields + `count`. Respect
-  `--format`. Sort by count desc (or by key — pick desc, document it).
-- Mutually exclusive with `--full`/`--index-record` (grouping returns
-  aggregates, not records) — error if combined.
+**Done.** Added `--group <comma-list>` (`-g`) to `cmd_search` as a standalone
+aggregate mode. `db::group_bucket` runs `SELECT f1,f2,…,COUNT(*) FROM events
+[WHERE source=?] GROUP BY f1,f2,…` per bucket and folds results into a shared
+`BTreeMap<Vec<String>, u64>`; `main::search_group` walks the index buckets
+(respecting `--source` and the `--after`/`--before` bucket range), merges counts,
+sorts by **count desc** (tie-break group key asc), and emits each combo + a
+`count` column through the T8 Renderer (so `--format`/`--render`/`--limit` all
+apply). NULL group values render as empty string.
 
-**Done when:** `--group src_ip` and `--group src_ip,dst_ip` produce unique
-combos + counts merged across buckets; tests cover multi-bucket merge.
+Guards:
+- Field names validated against `valid_fields` (indexed fields from sources.toml)
+  **and** an `is_sql_ident` check, since group fields are interpolated into the
+  SQL (not bound) — blocks injection / bad identifiers when sources.toml is absent.
+- Mutually exclusive with `--full`/`--index-record` (tracked via `record_flag_set`)
+  and with `--field`/`--query` — clear error if combined.
+
+**Verified:** 4 new db unit tests (single-field multi-bucket merge, two-field
+combos merge, source filter, NULL→empty key); 39 siemctl tests pass. Manual e2e
+on a freshly-indexed scratch dataset: `--group source` merged across two hourly
+buckets → sshd:10, iptables:6, systemd:5, sudo:4 (sorted desc); tsv/`--render`
+reorder/`--limit`/all error cases behave.
 
 ## T2 — merge sources.toml + normalized.toml (design)  (opus, med)  `[ ]`
 NOTES: "discussion: consider merging sources.toml and normalized.toml"

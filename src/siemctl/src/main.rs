@@ -290,6 +290,8 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
     let mut after: Option<time::HourBucket> = None;
     let mut before: Option<time::HourBucket> = None;
     let mut full = true;
+    let mut record_flag_set = false;
+    let mut group: Option<Vec<String>> = None;
     let mut render_fields: Option<Vec<String>> = None;
     let mut format = render::Format::Json;
     let mut limit: Option<usize> = None;
@@ -302,8 +304,20 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
             "--value" | "-v" => value = Some(next_arg(&mut it, arg)?.to_string()),
             "--query" | "-q" => query = Some(next_arg(&mut it, arg)?.to_string()),
             "--source" | "-s" => source = Some(next_arg(&mut it, arg)?.to_string()),
-            "--full" => full = true,
-            "--index-record" => full = false,
+            "--full" => { full = true; record_flag_set = true; }
+            "--index-record" => { full = false; record_flag_set = true; }
+            "--group" | "-g" => {
+                let fields: Vec<String> = next_arg(&mut it, arg)?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                if fields.is_empty() {
+                    return Err("--group requires at least one field name".into());
+                }
+                group = Some(fields);
+            }
             "--render" => {
                 let fields: Vec<String> = next_arg(&mut it, arg)?
                     .split(',')
@@ -348,6 +362,36 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
 
     if !data_dir.is_dir() {
         return Err(format!("data directory not found: {}", data_dir.display()).into());
+    }
+
+    if let Some(group_fields) = &group {
+        if record_flag_set {
+            return Err("--group cannot be combined with --full/--index-record \
+                        (grouping returns aggregate counts, not log records)".into());
+        }
+        if field_arg.is_some() || query.is_some() {
+            return Err("--group cannot be combined with --field/--query \
+                        (grouping is a standalone aggregate over the index)".into());
+        }
+        for f in group_fields {
+            if !is_sql_ident(f) {
+                return Err(format!("--group: invalid field name '{f}' \
+                    (only letters, digits and underscore allowed)").into());
+            }
+            if !valid_fields.is_empty() && !valid_fields.contains(f) {
+                let mut known: Vec<_> = valid_fields.iter().map(String::as_str).collect();
+                known.sort_unstable();
+                return Err(format!(
+                    "--group: unknown field '{f}'. Known fields: {}",
+                    known.join(", ")
+                ).into());
+            }
+        }
+        let mut renderer =
+            render::Renderer::new(format, render_fields, io::BufWriter::new(io::stdout()), limit);
+        let rc = search_group(&data_dir, group_fields, source.as_deref(), after, before, &mut renderer);
+        renderer.flush().ok();
+        return rc;
     }
 
     if let Some(fa) = &field_arg {
@@ -413,6 +457,9 @@ fn print_search_help() {
          \x20 --before YYYY-MM-DDTHH End of time range\n\
          \x20 --index-record          Print only indexed fields (not the original log line)\n\
          \x20 --full                 Alias for full-record mode (default; kept for compat)\n\
+         \x20 --group f1,f2,...      Count unique combinations of indexed fields\n\
+         \x20                        (aggregate mode; not combinable with --field/--query\n\
+         \x20                        /--full/--index-record). Sorted by count desc.\n\
          \x20 --limit N              Stop after N hits across all buckets/files\n\
          \x20 --render f1,f2,...     Output only these fields, in this order\n\
          \x20                        (default: all fields)\n\
@@ -427,7 +474,9 @@ fn print_search_help() {
          \x20 siemctl search --field event_type|startswith --value ssh\n\
          \x20 siemctl search --query \"Failed password\" --source sshd\n\
          \x20 siemctl search --source sshd --after 2026-06-22T08 --before 2026-06-22T10\n\
-         \x20 siemctl search --field src_ip|any --render timestamp,src_ip,username --format tsv"
+         \x20 siemctl search --field src_ip|any --render timestamp,src_ip,username --format tsv\n\
+         \x20 siemctl search --group src_ip\n\
+         \x20 siemctl search --group src_ip,dst_ip --source sshd --format tsv"
     );
 }
 
@@ -497,6 +546,94 @@ fn search_by_index<W: io::Write>(
         return Ok(1);
     }
     Ok(0)
+}
+
+/// Group indexed events by one or more fields, emitting unique combinations and
+/// their counts (sorted by count desc, then key asc). Each bucket is a separate
+/// SQLite DB, so counts are computed per-bucket and merged in Rust.
+fn search_group<W: io::Write>(
+    data_dir: &Path,
+    fields: &[String],
+    source: Option<&str>,
+    after: Option<time::HourBucket>,
+    before: Option<time::HourBucket>,
+    renderer: &mut render::Renderer<W>,
+) -> Result<i32> {
+    let idx_dir = data_dir.join("index");
+    if !idx_dir.is_dir() {
+        return Err(
+            "no index directory found — run 'indexd' to build the index first".into(),
+        );
+    }
+
+    let mut dbs: Vec<PathBuf> = fs::read_dir(&idx_dir)?
+        .flatten()
+        .filter(|e| e.path().extension().map(|x| x == "db").unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    dbs.sort();
+
+    if dbs.is_empty() {
+        return Err(
+            "index directory exists but contains no buckets — run 'indexd' to index your logs".into(),
+        );
+    }
+
+    let mut acc: std::collections::BTreeMap<Vec<String>, u64> = std::collections::BTreeMap::new();
+    for db_path in &dbs {
+        // Time-range filter: skip buckets outside [after, before]
+        if let Some(name) = db_path.file_name().and_then(|n| n.to_str()) {
+            if let Some(bkt) = time::HourBucket::from_filename(name) {
+                if after.map(|a| bkt < a).unwrap_or(false) {
+                    continue;
+                }
+                if before.map(|b| bkt > b).unwrap_or(false) {
+                    continue;
+                }
+            }
+        }
+        if let Err(e) = db::group_bucket(db_path, fields, source, &mut acc) {
+            let msg = e.to_string();
+            // Silently skip buckets missing the requested column/table
+            if !msg.contains("no such column") && !msg.contains("no such table") {
+                eprintln!("siemctl: {}: {e}", db_path.display());
+            }
+        }
+    }
+
+    if acc.is_empty() {
+        eprintln!("siemctl: no matches found");
+        return Ok(1);
+    }
+
+    // Sort by count descending, breaking ties by the group key ascending.
+    let mut entries: Vec<(Vec<String>, u64)> = acc.into_iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    for (key, count) in entries {
+        let mut rec: render::Record = Vec::with_capacity(fields.len() + 1);
+        for (f, v) in fields.iter().zip(key.iter()) {
+            rec.push((f.clone(), render::Val::Str(v.clone())));
+        }
+        rec.push(("count".to_string(), render::Val::Int(count as i64)));
+        let _ = renderer.emit_record(&rec);
+        if renderer.is_done() {
+            break;
+        }
+    }
+    Ok(0)
+}
+
+/// True if `s` is a safe bare SQL identifier (letters/digits/underscore, not
+/// starting with a digit). Used to guard `--group` field names that are
+/// interpolated into the GROUP BY query rather than bound as parameters.
+fn is_sql_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Pure-Rust full-text substring search across raw JSONL files.

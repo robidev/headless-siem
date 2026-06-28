@@ -1,4 +1,5 @@
 use rusqlite::{Connection, OpenFlags};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -270,6 +271,55 @@ fn print_rows_cidr<W: Write>(
     Ok(count)
 }
 
+/// Run `SELECT f1,f2,…, COUNT(*) FROM events [WHERE source = ?] GROUP BY f1,f2,…`
+/// against a single bucket and fold the counts into `acc`, keyed by the ordered
+/// group-field values (NULL rendered as empty string). Because each bucket is a
+/// separate DB, the caller calls this once per bucket against a shared `acc` to
+/// merge counts across the whole time range.
+///
+/// `fields` must already be validated as safe SQL identifiers by the caller
+/// (they are interpolated into the query, not bound).
+pub fn group_bucket(
+    db_path: &Path,
+    fields: &[String],
+    source_filter: Option<&str>,
+    acc: &mut BTreeMap<Vec<String>, u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rusqlite::types::ValueRef;
+
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+
+    let cols = fields.join(", ");
+    let (where_clause, params): (String, Vec<String>) = match source_filter {
+        Some(src) => (" WHERE source = ?".to_string(), vec![src.to_string()]),
+        None => (String::new(), vec![]),
+    };
+    let sql = format!("SELECT {cols}, COUNT(*) FROM events{where_clause} GROUP BY {cols}");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let n = fields.len();
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let mut rows = stmt.query(param_refs.as_slice())?;
+
+    while let Some(row) = rows.next()? {
+        let mut key = Vec::with_capacity(n);
+        for i in 0..n {
+            let part = match row.get_ref(i)? {
+                ValueRef::Null => String::new(),
+                ValueRef::Integer(v) => v.to_string(),
+                ValueRef::Real(v) => v.to_string(),
+                ValueRef::Text(b) => String::from_utf8_lossy(b).into_owned(),
+                ValueRef::Blob(_) => String::new(),
+            };
+            key.push(part);
+        }
+        let count: i64 = row.get(n)?;
+        *acc.entry(key).or_insert(0) += count as u64;
+    }
+    Ok(())
+}
+
 /// Emit one matched row: the resolved raw line when `full`, otherwise the index
 /// row. On any `--full` resolution failure, warns and falls back to the index
 /// row so a hit is never silently dropped. Write errors are ignored (matching
@@ -489,5 +539,113 @@ mod tests {
         fs::write(&jsonl, "{\"x\":1}\r\n").unwrap();
         let result = resolve_raw_line(&tmp.path, "crlf.jsonl", 0).unwrap();
         assert_eq!(result, "{\"x\":1}");
+    }
+
+    // ── group_bucket ──────────────────────────────────────────────────────
+
+    /// Build a minimal index bucket with an `events(src_ip, dst_ip, source)`
+    /// table populated from `rows`.
+    fn make_bucket(path: &Path, rows: &[(&str, &str, &str)]) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (src_ip TEXT, dst_ip TEXT, source TEXT);",
+        )
+        .unwrap();
+        for (src_ip, dst_ip, source) in rows {
+            conn.execute(
+                "INSERT INTO events (src_ip, dst_ip, source) VALUES (?1, ?2, ?3)",
+                rusqlite::params![src_ip, dst_ip, source],
+            )
+            .unwrap();
+        }
+    }
+
+    fn key(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn group_single_field_merges_across_buckets() {
+        let tmp = TempDir::new();
+        let db1 = tmp.path.join("2026-06-22-08.db");
+        let db2 = tmp.path.join("2026-06-22-09.db");
+        make_bucket(&db1, &[
+            ("10.0.0.1", "a", "sshd"),
+            ("10.0.0.1", "b", "sshd"),
+            ("10.0.0.2", "c", "sshd"),
+        ]);
+        make_bucket(&db2, &[
+            ("10.0.0.1", "d", "sshd"),
+            ("10.0.0.3", "e", "sshd"),
+        ]);
+
+        let fields = vec!["src_ip".to_string()];
+        let mut acc = BTreeMap::new();
+        group_bucket(&db1, &fields, None, &mut acc).unwrap();
+        group_bucket(&db2, &fields, None, &mut acc).unwrap();
+
+        assert_eq!(acc.get(&key(&["10.0.0.1"])), Some(&3)); // 2 in db1 + 1 in db2
+        assert_eq!(acc.get(&key(&["10.0.0.2"])), Some(&1));
+        assert_eq!(acc.get(&key(&["10.0.0.3"])), Some(&1));
+        assert_eq!(acc.len(), 3);
+    }
+
+    #[test]
+    fn group_two_fields_combos_merge() {
+        let tmp = TempDir::new();
+        let db1 = tmp.path.join("2026-06-22-08.db");
+        let db2 = tmp.path.join("2026-06-22-09.db");
+        make_bucket(&db1, &[
+            ("10.0.0.1", "192.168.0.1", "sshd"),
+            ("10.0.0.1", "192.168.0.1", "sshd"),
+            ("10.0.0.1", "192.168.0.2", "sshd"),
+        ]);
+        make_bucket(&db2, &[("10.0.0.1", "192.168.0.1", "sshd")]);
+
+        let fields = vec!["src_ip".to_string(), "dst_ip".to_string()];
+        let mut acc = BTreeMap::new();
+        group_bucket(&db1, &fields, None, &mut acc).unwrap();
+        group_bucket(&db2, &fields, None, &mut acc).unwrap();
+
+        assert_eq!(acc.get(&key(&["10.0.0.1", "192.168.0.1"])), Some(&3)); // 2 + 1
+        assert_eq!(acc.get(&key(&["10.0.0.1", "192.168.0.2"])), Some(&1));
+        assert_eq!(acc.len(), 2);
+    }
+
+    #[test]
+    fn group_source_filter_restricts_rows() {
+        let tmp = TempDir::new();
+        let db = tmp.path.join("2026-06-22-08.db");
+        make_bucket(&db, &[
+            ("10.0.0.1", "a", "sshd"),
+            ("10.0.0.1", "b", "sudo"),
+            ("10.0.0.2", "c", "sshd"),
+        ]);
+
+        let fields = vec!["src_ip".to_string()];
+        let mut acc = BTreeMap::new();
+        group_bucket(&db, &fields, Some("sshd"), &mut acc).unwrap();
+
+        assert_eq!(acc.get(&key(&["10.0.0.1"])), Some(&1)); // sudo row excluded
+        assert_eq!(acc.get(&key(&["10.0.0.2"])), Some(&1));
+        assert_eq!(acc.len(), 2);
+    }
+
+    #[test]
+    fn group_null_value_becomes_empty_key() {
+        let tmp = TempDir::new();
+        let db = tmp.path.join("2026-06-22-08.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE events (src_ip TEXT, source TEXT);").unwrap();
+        conn.execute("INSERT INTO events (src_ip, source) VALUES (NULL, 'sshd')", []).unwrap();
+        conn.execute("INSERT INTO events (src_ip, source) VALUES ('10.0.0.1', 'sshd')", []).unwrap();
+        drop(conn);
+
+        let fields = vec!["src_ip".to_string()];
+        let mut acc = BTreeMap::new();
+        group_bucket(&db, &fields, None, &mut acc).unwrap();
+
+        assert_eq!(acc.get(&key(&[""])), Some(&1));
+        assert_eq!(acc.get(&key(&["10.0.0.1"])), Some(&1));
     }
 }
