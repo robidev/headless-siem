@@ -21,7 +21,7 @@ Foundation-first so output-layer tasks don't get reworked:
 | T1 | siemctl: make full record the default (`--index-record`) | **sonnet** | low | T8 | ✓ |
 | T5 | siemctl `--limit N` | **sonnet** | med | T8 | ✓ |
 | T7 | siemctl `--group f1,f2` with counts | **opus** | high | T8 | ✓ |
-| T2 | merge sources.toml + normalized.toml (design doc) | **opus** | med | — |
+| T2 | merge sources.toml + normalized.toml (design doc) | **opus** | med | — | ✓ |
 
 T4, T3, T6, T2 are independent and can be done in any order. T1/T5/T7 all sit on
 top of the T8 render layer, so T8 goes first among the siemctl-output tasks.
@@ -191,20 +191,22 @@ on a freshly-indexed scratch dataset: `--group source` merged across two hourly
 buckets → sshd:10, iptables:6, systemd:5, sudo:4 (sorted desc); tsv/`--render`
 reorder/`--limit`/all error cases behave.
 
-## T2 — merge sources.toml + normalized.toml (design)  (opus, med)  `[ ]`
+## T2 — merge sources.toml + normalized.toml (design)  (opus, med)  `[x]`
 NOTES: "discussion: consider merging sources.toml and normalized.toml"
 
-This is **analysis + recommendation**, not necessarily code. Deliver
-`docs/config-merge-proposal.md` covering:
-- Consumers today: `normalized` reads normalized.toml (listen/storage/overrides/
-  extract); `indexd` + `siemctl` read sources.toml (index_fields per source).
-- Options: (a) single file with namespaced sections each tool ignores what it
-  doesn't need; (b) keep split but share via `--config-dir` (already supported
-  by normalized); (c) status quo.
-- Trade-offs: coupling, blast radius, who must parse what, migration cost.
-- Recommendation + migration steps if "merge" is chosen.
-
-**Done when:** proposal doc committed; no behavior change unless we then act on it.
+**Done.** Delivered `docs/config-merge-proposal.md`. Recommendation: **keep the
+files separate**; do not merge. Grounded in the code: the consumers are disjoint
+(normalized reads normalized.toml; indexd+siemctl read sources.toml — verified
+via each crate's config loader), the keys don't align (normalized rules key on
+`app_name` with relabeling, sources.toml keys on the derived source label, and
+several sources have no extract rule), the edit cadences differ (volatile
+319-line ruleset vs. stable 35-line schema), and the parsers differ (indexd uses
+the `toml` crate; siemctl deliberately hand-rolls a scanner to avoid that dep —
+a merge would likely force `toml` into siemctl). The only genuine pull (the
+"forgot to index a captured field" gap) is closed better by a proposed
+**`siemctl validate` cross-check** (warn on producible-but-unindexed fields and
+dead index columns) than by a structural merge. Doc also covers Option (b)
+(shared `--config-dir`) as an optional friction-reducer. No behavior change.
 
 ---
 
