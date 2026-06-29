@@ -42,7 +42,7 @@ impl IndexDb {
             .map(|i| format!("?{}", i))
             .collect();
         let insert_sql = format!(
-            "INSERT INTO events ({}) VALUES ({})",
+            "INSERT OR IGNORE INTO events ({}) VALUES ({})",
             columns.join(", "),
             placeholders.join(", ")
         );
@@ -143,7 +143,7 @@ impl IndexDb {
             .collect();
 
         let create_table = format!(
-            "CREATE TABLE IF NOT EXISTS events ({})",
+            "CREATE TABLE IF NOT EXISTS events ({}, UNIQUE(raw_file, byte_offset))",
             column_defs.join(", ")
         );
         conn.execute_batch(&create_table)?;
@@ -317,7 +317,8 @@ mod tests {
                 );
             }
 
-            // Verify indexes exist (one per field except byte_offset)
+            // Verify indexes exist: one per field except byte_offset, plus one
+            // implicit index for the UNIQUE(raw_file, byte_offset) constraint.
             let index_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='events'",
@@ -325,8 +326,9 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            // 7 indexes: timestamp, source, src_ip, dst_ip, event_type, severity, raw_file
-            assert_eq!(index_count, 7);
+            // 7 explicit (timestamp, source, src_ip, dst_ip, event_type, severity, raw_file)
+            // + 1 implicit from UNIQUE(raw_file, byte_offset) = 8
+            assert_eq!(index_count, 8);
         }
 
         db.close_all();
@@ -375,6 +377,32 @@ mod tests {
         }
 
         db.close_all();
+    }
+
+    #[test]
+    fn test_insert_or_ignore_deduplicates_by_raw_file_and_offset() {
+        let tmp = TempDir::new();
+        let fields = default_fields();
+        let db = IndexDb::new(&tmp.path, &fields);
+        let key = db.open_bucket("2026/06/22/08").unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("timestamp".to_string(), "Jun 22 08:55:03".to_string());
+        event.insert("source".to_string(), "sshd".to_string());
+        event.insert("src_ip".to_string(), "10.0.0.5".to_string());
+        event.insert("byte_offset".to_string(), "0".to_string());
+        event.insert("raw_file".to_string(), "raw/2026/06/22/08/55/03/sshd.jsonl".to_string());
+
+        // Insert the same event twice — second should be silently ignored.
+        db.insert_batch(&key, &[event.clone()]).unwrap();
+        db.insert_batch(&key, &[event]).unwrap();
+
+        let connections = db.connections.lock().unwrap();
+        let conn = connections.get(&key).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "duplicate (raw_file, byte_offset) must be silently dropped");
     }
 
     #[test]
@@ -466,12 +494,14 @@ mod tests {
     fn test_dynamic_fields_from_config() {
         let tmp = TempDir::new();
         // Simulate what config.all_index_fields() would return
-        // with extra fields like "username" and "dst_port"
+        // with extra fields like "username" and "dst_port".
+        // raw_file and byte_offset are always present (UNIQUE constraint).
         let fields = vec![
             "byte_offset".to_string(),
             "dst_ip".to_string(),
             "dst_port".to_string(),
             "event_type".to_string(),
+            "raw_file".to_string(),
             "severity".to_string(),
             "source".to_string(),
             "src_ip".to_string(),
