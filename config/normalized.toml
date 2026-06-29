@@ -28,6 +28,14 @@ data_dir = "data"
 contains = "[UFW "
 source = "iptables"
 
+# pfSense filterlog: the message body is a positional CSV whose column positions
+# shift between IPv4 and IPv6 and between protocols.  Trigger the dedicated
+# filterlog Rust parser as a second pass on the message field.
+[[overrides.rule]]
+contains = " filterlog "
+reparse = true
+reparse_as = "filterlog"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # sshd
 #
@@ -317,3 +325,96 @@ app_name = "sshd-session"
 ssh_read_error = "Read error"
 set = { event_type = "ssh_read_error", severity = "warning" }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# filterlog  (pfSense firewall)
+#
+# The CSV payload is decoded by parsers/filterlog.rs (triggered via the
+# override rule above).  That parser sets `action` to "BLOCK" or "ALLOW" and
+# populates src_ip, dst_ip, src_port, dst_port, protocol, interface, direction.
+# These two pass-2 rules assign the event_type from the already-set action.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "filterlog"
+action = "BLOCK"
+set = { event_type = "firewall_block" }
+
+[[extract.rule]]
+app_name = "filterlog"
+action = "ALLOW"
+set = { event_type = "firewall_allow" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# openvpn  (pfSense OpenVPN)
+#
+# Patterns handled:
+#   TLS Error: tls-crypt unwrapping failed from [AF_INET]<ip>:<port>
+#   tls-crypt unwrap error: packet authentication failed
+#   SIGUSR1[soft,ping-restart] received, process restarting
+#   UDPv4 link remote: [AF_INET]<ip>:<port>
+#   [UNDEF] Inactivity timeout (--ping-restart), restarting
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "openvpn"
+from = "message"
+# TLS failure with source IP — most events (probing / misconfigured client)
+pattern = "^TLS Error: (?P<openvpn_tls>tls-crypt unwrapping failed) from \[AF_INET\](?P<src_ip>[\d.]+):(?P<src_port>\d+)"
+# TLS auth failure without an IP (local unwrap error)
+pattern = "^(?P<openvpn_tls>tls-crypt unwrap error): packet authentication failed"
+# Process restart signal
+pattern = "^(?P<openvpn_restart>SIGUSR1)\["
+# Link established — extract remote endpoint
+pattern = "link remote: \[AF_INET\](?P<src_ip>[\d.]+):(?P<src_port>\d+)"
+pattern = "^(?P<openvpn_link>UDPv4 link remote|TCPv4 link remote|UDPv6 link remote)"
+# Inactivity timeout
+pattern = "(?P<openvpn_timeout>Inactivity timeout)"
+
+[[extract.rule]]
+app_name = "openvpn"
+openvpn_tls = "tls-crypt unwrapping failed"
+set = { event_type = "vpn_tls_error" }
+
+[[extract.rule]]
+app_name = "openvpn"
+openvpn_tls = "tls-crypt unwrap error"
+set = { event_type = "vpn_auth_failure" }
+
+[[extract.rule]]
+app_name = "openvpn"
+openvpn_restart = "SIGUSR1"
+set = { event_type = "vpn_restart" }
+
+[[extract.rule]]
+app_name = "openvpn"
+openvpn_link = "UDPv4 link remote"
+set = { event_type = "vpn_link_up" }
+
+[[extract.rule]]
+app_name = "openvpn"
+openvpn_link = "TCPv4 link remote"
+set = { event_type = "vpn_link_up" }
+
+[[extract.rule]]
+app_name = "openvpn"
+openvpn_timeout = "Inactivity timeout"
+set = { event_type = "vpn_timeout" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# php-fpm  (pfSense web UI admin audit log)
+#
+# Patterns handled:
+#   /<page>: Configuration Change: <user>@<ip> (<auth>): <description>
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "php-fpm"
+from = "message"
+# Admin configuration change — extract page path, acting user, source IP
+pattern = "^(?P<pfsense_page>/[^:]+): (?P<pfsense_change>Configuration Change): (?P<admin_user>[^@]+)@(?P<src_ip>[\d.]+)"
+
+[[extract.rule]]
+app_name = "php-fpm"
+pfsense_change = "Configuration Change"
+set = { event_type = "pfsense_config_change" }

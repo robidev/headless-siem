@@ -24,6 +24,7 @@ pub mod logfmt;
 pub mod csv;
 pub mod xml;
 pub mod yaml;
+pub mod filterlog;
 pub mod plain;
 
 use std::collections::HashMap;
@@ -283,6 +284,7 @@ fn force_parse(fmt: &str, raw: &[u8], source_addr: &str) -> Option<Event> {
         "csv" => csv::parse(raw, source_addr),
         "xml" => xml::parse(raw, source_addr),
         "yaml" => yaml::parse(raw, source_addr),
+        "filterlog" => filterlog::parse(raw, source_addr),
         "plain" => Some(plain::parse(raw, source_addr)),
         other => {
             eprintln!("[normalized] unknown forced format '{}', using plain", other);

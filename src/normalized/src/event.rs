@@ -20,23 +20,25 @@ pub enum Format {
     Csv,
     Xml,
     Yaml,
+    Filterlog,
     Plain,
 }
 
 impl Format {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Format::Rfc5424   => "rfc5424",
-            Format::Rfc3164   => "rfc3164",
-            Format::Json      => "json",
-            Format::JsonArray => "json_array",
-            Format::Cef       => "cef",
-            Format::Leef      => "leef",
-            Format::Logfmt    => "logfmt",
-            Format::Csv       => "csv",
-            Format::Xml       => "xml",
-            Format::Yaml      => "yaml",
-            Format::Plain     => "plain",
+            Format::Rfc5424    => "rfc5424",
+            Format::Rfc3164    => "rfc3164",
+            Format::Json       => "json",
+            Format::JsonArray  => "json_array",
+            Format::Cef        => "cef",
+            Format::Leef       => "leef",
+            Format::Logfmt     => "logfmt",
+            Format::Csv        => "csv",
+            Format::Xml        => "xml",
+            Format::Yaml       => "yaml",
+            Format::Filterlog  => "filterlog",
+            Format::Plain      => "plain",
         }
     }
 }

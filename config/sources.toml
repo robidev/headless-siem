@@ -34,6 +34,15 @@
 # Declare application-specific fields below. Only list fields not already in
 # the always-indexed set above.
 
+[source.filterlog]
+index_fields = ["src_ip", "dst_ip", "dst_port", "action", "protocol", "interface", "direction", "event_type"]
+
+[source.openvpn]
+index_fields = ["src_ip", "src_port", "event_type"]
+
+[source.php-fpm]
+index_fields = ["admin_user", "src_ip", "event_type", "pfsense_page"]
+
 [source.sshd]
 index_fields = ["src_ip", "event_type", "username"]
 
