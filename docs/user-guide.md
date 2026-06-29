@@ -132,11 +132,11 @@ target/debug/siemctl status --data-dir data/
 
 # Search for events by IP (uses SQLite index)
 target/debug/siemctl search --data-dir data/ \
-  --field src_ip --value "10.0.0.5"
+  --query "src_ip == 10.0.0.5"
 
 # Search by time range
 target/debug/siemctl search --data-dir data/ \
-  --source sshd --after "2026-06-22T08" --before "2026-06-22T09"
+  --query "source == sshd" --after "2026-06-22T08" --before "2026-06-22T09"
 
 # Stream live events
 target/debug/siemctl tail --data-dir data/
@@ -306,47 +306,90 @@ target/debug/siemctl dry-run \
 
 ### Searching
 
-`siemctl search` supports three search modes:
+`siemctl search` takes **one query expression** in a small SQL-ish DSL via
+`--query`. Field filters, full-text, grouping and limits all compose in that one
+string — and all run through the SQLite index. The whole predicate / `GROUP BY`
+/ `LIMIT` is the `--query` value; the only other flags are `--after`/`--before`
+(time-range bucket pruning), `--format`, `--data-dir`, and `--raw` (the raw-file
+escape hatch).
 
-**1. Index-assisted field search (fast):**
+**DSL grammar**
+
+```
+query   := [WHERE] [expr] [GROUP BY f1,f2,...] [LIMIT n]
+expr    := AND / OR / NOT / ( ) over comparisons and functions
+compare := field (== | = | != | <>) value
+funcs   := startswith(f,'v')  endswith(f,'v')  contains(f,'v')
+           any(f)  cidr_match(f,'a.b.c.d/n')  raw_contains('needle')
+```
+
+`AND` binds tighter than `OR`; use parentheses to override. Quotes are optional
+everywhere (a slot's role is fixed by position) and keywords are
+case-insensitive. A leading `WHERE` is accepted and ignored.
+
+**1. Field predicates (index-backed):**
 
 ```bash
-# Search by source IP (uses SQLite index)
-siemctl search --data-dir data/ --field src_ip --value "10.0.0.5"
+# Exact match
+siemctl search --data-dir data/ --query "src_ip == 10.0.0.5"
 
-# Field modifiers: |startswith, |endswith, |contains
-siemctl search --data-dir data/ --field event_type|startswith --value "ssh"
+# startswith / endswith / contains / any / cidr_match
+siemctl search --data-dir data/ --query "startswith(event_type,'ssh')"
+siemctl search --data-dir data/ --query "any(username)"
+siemctl search --data-dir data/ --query "cidr_match(src_ip,'10.0.0.0/24')"
 
-# With time range
-siemctl search --data-dir data/ --field src_ip --value "10.0.0.5" \
+# Combine conditions and prune by time range
+siemctl search --data-dir data/ \
+  --query "src_ip == 10.0.0.5 AND source == sshd" \
   --after "2026-06-22T08" --before "2026-06-22T12"
-
-# Filter by source
-siemctl search --data-dir data/ --field event_type --value "ssh_auth_failure" \
-  --source sshd
 ```
 
-**2. Full-text grep search:**
+**2. Full-text (composes with everything):**
 
 ```bash
-# Search all raw JSONL files for a substring
-siemctl search --data-dir data/ --query "10.0.0.5"
+# Substring over each row's original raw line (via the raw_contains UDF)
+siemctl search --data-dir data/ --query "raw_contains('Failed password')"
 
-# With time range
-siemctl search --data-dir data/ --query "root" \
-  --after "2026-06-22T08" --before "2026-06-22T09"
+# Field filter + text — the field index narrows rows first, then the substring
+# test runs only on survivors
+siemctl search --data-dir data/ \
+  --query "source == sshd AND raw_contains('root')"
 ```
 
-**3. Time-range listing:**
+**3. Grouping (filter then group) and limits:**
 
 ```bash
-# Dump all events in a time window
+# Count unique values, sorted by count desc (merged across hourly buckets)
+siemctl search --data-dir data/ --query "GROUP BY src_ip"
+
+# Filter, then group — a single composed query
+siemctl search --data-dir data/ --query "source == sshd GROUP BY src_ip,event_type"
+
+# Cap the rows emitted
+siemctl search --data-dir data/ --query "GROUP BY src_ip LIMIT 10"
+```
+
+**4. Time-range listing (empty predicate = match all):**
+
+```bash
+# Dump every indexed event in a time window
 siemctl search --data-dir data/ \
   --after "2026-06-22T08" --before "2026-06-22T09"
+```
 
-# Filter by source
-siemctl search --data-dir data/ --source sshd \
-  --after "2026-06-22T08" --before "2026-06-22T09"
+**5. `--raw` — bypass the index:**
+
+Text search now goes through the index, which is eventually consistent (inotify
+driven), so the newest not-yet-indexed lines can be missed. `--raw` scans the
+raw JSONL files directly — use it when the index is missing/stale or you need the
+very latest events. Its argument is a **literal substring**, not DSL:
+
+```bash
+# Substring scan straight over raw files
+siemctl search --data-dir data/ --raw "Failed password"
+
+# With a time range; omit the substring to dump the range
+siemctl search --data-dir data/ --raw --after "2026-06-22T08" --before "2026-06-22T09"
 ```
 
 **Direct grep (no siemctl needed):**
@@ -577,7 +620,7 @@ siemctl status --data-dir /path/to/your/data/
 
 ### Fields missing from search results
 
-`siemctl search --field` only works for fields listed in `index_fields` in `sources.toml`. To search an unindexed field, use `--query` (full-text substring search) or inspect the JSONL directly:
+Field predicates in `--query` (e.g. `field == value`, `contains(field,…)`) only work for fields listed in `index_fields` in `sources.toml` — an unknown field is a clean parse error. To search an unindexed field, use `raw_contains('…')` (or `--raw 'substring'`) for a full-text match, or inspect the JSONL directly:
 
 ```bash
 jq 'select(.src_ip == "10.0.0.5")' data/raw/**/**/**/**/**/**/*.jsonl

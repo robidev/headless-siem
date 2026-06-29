@@ -25,16 +25,18 @@ impl HourBucket {
         Some(Self { year, month, day, hour })
     }
 
-    /// Parse from a bucket filename like `2026062208.db`.
+    /// Parse from a bucket filename like `2026-06-22-08.db` (indexd writes the
+    /// `YYYY/MM/DD/HH` bucket key with slashes replaced by dashes).
     pub fn from_filename(name: &str) -> Option<Self> {
         let base = name.strip_suffix(".db").unwrap_or(name);
-        if base.len() < 10 {
+        let mut p = base.split('-');
+        let year: i32 = p.next()?.parse().ok()?;
+        let month: u8 = p.next()?.parse().ok()?;
+        let day: u8 = p.next()?.parse().ok()?;
+        let hour: u8 = p.next()?.parse().ok()?;
+        if p.next().is_some() {
             return None;
         }
-        let year: i32 = base[0..4].parse().ok()?;
-        let month: u8 = base[4..6].parse().ok()?;
-        let day: u8 = base[6..8].parse().ok()?;
-        let hour: u8 = base[8..10].parse().ok()?;
         if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 {
             return None;
         }
@@ -83,6 +85,37 @@ fn days_in_month(m: u8, y: i32) -> u8 {
             }
         }
         _ => 31,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_filename_parses_dashed_bucket() {
+        let b = HourBucket::from_filename("2026-06-22-08.db").unwrap();
+        assert_eq!(b, HourBucket { year: 2026, month: 6, day: 22, hour: 8 });
+    }
+
+    #[test]
+    fn from_filename_without_suffix() {
+        let b = HourBucket::from_filename("2026-12-31-23").unwrap();
+        assert_eq!(b, HourBucket { year: 2026, month: 12, day: 31, hour: 23 });
+    }
+
+    #[test]
+    fn from_filename_rejects_garbage() {
+        assert!(HourBucket::from_filename("not-a-bucket.db").is_none());
+        assert!(HourBucket::from_filename("2026-13-01-00.db").is_none()); // bad month
+        assert!(HourBucket::from_filename("2026-06-22-08-09.db").is_none()); // extra field
+    }
+
+    #[test]
+    fn from_filename_ordering_matches_parse() {
+        let a = HourBucket::from_filename("2026-06-22-08.db").unwrap();
+        let b = HourBucket::parse("2026-06-22T09").unwrap();
+        assert!(a < b);
     }
 }
 

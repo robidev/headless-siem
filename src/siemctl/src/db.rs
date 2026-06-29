@@ -7,17 +7,20 @@ use crate::render::{Record, Renderer, Val};
 
 /// How to compare a field value in a WHERE clause.
 ///
-/// Extension point: add variants here (e.g. `Regex`, `Range`, `Not`) and handle
-/// them in `FieldFilter::to_sql` without touching any command-level code.
+/// Used by the query compiler (`query.rs`) to turn a parsed `Condition::Field`
+/// into a SQL predicate. `Cidr` compiles to the `cidr_match` UDF; the rest are
+/// plain SQL comparisons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchMode {
     Exact,
+    /// `!=` / `<>` — field does not equal the value.
+    NotExact,
     StartsWith,
     EndsWith,
     Contains,
-    /// IPv4 CIDR range: fetch all non-empty rows and filter in Rust.
+    /// IPv4 CIDR range, evaluated by the `cidr_match` SQLite UDF.
     Cidr,
-    /// Match any non-empty value: `field != ''`. No --value needed.
+    /// Match any non-empty value: `field != ''`. No value needed.
     Any,
 }
 
@@ -66,62 +69,49 @@ pub fn cidr_contains(cidr: &str, ip: &str) -> Result<bool, String> {
     Ok((ip_u32 & mask) == (net & mask))
 }
 
-/// A single indexed-field search filter.
+/// Register the `siemctl` SQLite UDFs on a per-bucket connection.
 ///
-/// Future search features (multi-field AND, OR, exclusions, CIDR, numeric ranges)
-/// can be added as additional fields or via a wrapper `Query` struct that holds
-/// `Vec<Condition>` where `Condition` wraps `FieldFilter` and future variants.
-#[derive(Debug, Clone)]
-pub struct FieldFilter {
-    pub field: String,
-    pub value: String,
-    pub mode: MatchMode,
-}
+/// - `cidr_match(col, 'a.b.c.d/n') -> bool` — deterministic IPv4 CIDR test,
+///   wrapping [`cidr_contains`]. A malformed CIDR yields `false` (CIDR literals
+///   are validated at DSL parse time, so this is only a defensive net).
+/// - `raw_contains(raw_file, byte_offset, 'needle') -> bool` — non-deterministic
+///   substring test against the row's original raw JSONL line, resolved on
+///   demand via [`resolve_raw_line`]. Any IO error yields `false` (never `Err`)
+///   so one unreadable file can't abort the whole bucket statement.
+pub fn register_udfs(conn: &Connection, data_dir: &Path) -> rusqlite::Result<()> {
+    use rusqlite::functions::FunctionFlags;
 
-impl FieldFilter {
-    /// Parse `"field_name"` or `"field_name|modifier"` + a value string.
-    /// For `|any`, value is ignored (pass `""` from the call site).
-    pub fn parse(field_arg: &str, value: &str) -> Self {
-        let (field, mode) = if let Some(b) = field_arg.strip_suffix("|startswith") {
-            (b.to_string(), MatchMode::StartsWith)
-        } else if let Some(b) = field_arg.strip_suffix("|endswith") {
-            (b.to_string(), MatchMode::EndsWith)
-        } else if let Some(b) = field_arg.strip_suffix("|contains") {
-            (b.to_string(), MatchMode::Contains)
-        } else if let Some(b) = field_arg.strip_suffix("|cidr") {
-            (b.to_string(), MatchMode::Cidr)
-        } else if let Some(b) = field_arg.strip_suffix("|any") {
-            (b.to_string(), MatchMode::Any)
-        } else {
-            (field_arg.to_string(), MatchMode::Exact)
-        };
-        Self { field, value: value.to_string(), mode }
-    }
+    conn.create_scalar_function(
+        "cidr_match",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let ip: String = ctx.get(0)?;
+            let cidr: String = ctx.get(1)?;
+            Ok(cidr_contains(&cidr, &ip).unwrap_or(false))
+        },
+    )?;
 
-    /// Base field name without any modifier suffix (used for validation).
-    pub fn base_field(&self) -> &str {
-        &self.field
-    }
+    let dd = data_dir.to_path_buf();
+    conn.create_scalar_function(
+        "raw_contains",
+        3,
+        FunctionFlags::SQLITE_UTF8,
+        move |ctx| {
+            let raw_file: String = ctx.get(0)?;
+            let byte_offset: i64 = ctx.get(1)?;
+            let needle: String = ctx.get(2)?;
+            if byte_offset < 0 {
+                return Ok(false);
+            }
+            Ok(match resolve_raw_line(&dd, &raw_file, byte_offset as u64) {
+                Ok(line) => line.contains(&needle),
+                Err(_) => false,
+            })
+        },
+    )?;
 
-    fn sql_pattern(&self) -> String {
-        match self.mode {
-            MatchMode::Exact => self.value.clone(),
-            MatchMode::StartsWith => format!("{}%", self.value),
-            MatchMode::EndsWith => format!("%{}", self.value),
-            MatchMode::Contains => format!("%{}%", self.value),
-            MatchMode::Cidr | MatchMode::Any => String::new(), // no bind param
-        }
-    }
-
-    fn sql_predicate(&self) -> String {
-        let op = match self.mode {
-            MatchMode::Exact => "= ?",
-            MatchMode::Contains => "LIKE ? COLLATE NOCASE",
-            MatchMode::Cidr | MatchMode::Any => "!= ''", // no bind param
-            _ => "LIKE ?",
-        };
-        format!("{} {}", self.field, op)
-    }
+    Ok(())
 }
 
 /// Resolve the original JSONL line for an index row using `raw_file` + `byte_offset`.
@@ -149,48 +139,32 @@ fn resolve_raw_line(data_dir: &Path, raw_file: &str, byte_offset: u64) -> Result
     }
 }
 
-/// Open a single SQLite index bucket (read-only) and emit matching rows through
-/// `renderer`. Returns the row count emitted.
-///
-/// When `full` is true and `data_dir` is provided, each hit resolves the
-/// original JSONL line via `raw_file` + `byte_offset` and emits that instead of
-/// the index row. Falls back to the index row if the raw file is missing or the
-/// row pre-dates T5 (no raw_file stored).
-pub fn query_bucket<W: Write>(
-    db_path: &Path,
-    filter: &FieldFilter,
-    source_filter: Option<&str>,
-    data_dir: Option<&Path>,
-    full: bool,
-    renderer: &mut Renderer<W>,
-) -> Result<usize, Box<dyn std::error::Error>> {
+/// Open a single SQLite index bucket read-only and register the `siemctl` UDFs
+/// (`cidr_match`, `raw_contains`) on the connection, so a compiled query that
+/// references them can run. `data_dir` is captured by `raw_contains`.
+pub fn open_bucket_conn(db_path: &Path, data_dir: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-
-    if filter.mode == MatchMode::Cidr {
-        // Validate CIDR once before touching the DB
-        cidr_contains(&filter.value, "0.0.0.0")
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        return Ok(print_rows_cidr(&conn, filter, source_filter, data_dir, full, renderer)?);
-    }
-
-    let mut where_parts = vec![filter.sql_predicate()];
-    // Any generates a static predicate (field != '') with no bind parameter
-    let mut params: Vec<String> = if filter.mode == MatchMode::Any {
-        vec![]
-    } else {
-        vec![filter.sql_pattern()]
-    };
-
-    if let Some(src) = source_filter {
-        where_parts.push("source = ?".to_string());
-        params.push(src.to_string());
-    }
-
-    let sql = format!("SELECT * FROM events WHERE {}", where_parts.join(" AND "));
-    Ok(print_rows(&conn, &sql, &params, data_dir, full, renderer)?)
+    register_udfs(&conn, data_dir)?;
+    Ok(conn)
 }
 
-fn print_rows<W: Write>(
+/// Run a compiled row-mode query against one open bucket connection and emit the
+/// resolved raw line for each matching row through `renderer`. Returns the row
+/// count emitted. Thin wrapper over [`print_rows`] kept for symmetry with the
+/// group path; the executor in `query.rs` calls it per bucket.
+pub fn run_row_query<W: Write>(
+    conn: &Connection,
+    sql: &str,
+    params: &[String],
+    data_dir: &Path,
+    renderer: &mut Renderer<W>,
+) -> rusqlite::Result<usize> {
+    // Row mode always resolves and emits the original raw line (the old
+    // `--full` default), falling back to the index row when resolution fails.
+    print_rows(conn, sql, params, Some(data_dir), true, renderer)
+}
+
+pub(crate) fn print_rows<W: Write>(
     conn: &Connection,
     sql: &str,
     params: &[String],
@@ -221,83 +195,26 @@ fn print_rows<W: Write>(
     Ok(count)
 }
 
-/// Fetch candidate rows for CIDR search (field != '') then filter in Rust.
-fn print_rows_cidr<W: Write>(
-    conn: &Connection,
-    filter: &FieldFilter,
-    source_filter: Option<&str>,
-    data_dir: Option<&Path>,
-    full: bool,
-    renderer: &mut Renderer<W>,
-) -> rusqlite::Result<usize> {
-    let mut where_parts = vec![filter.sql_predicate()]; // "field != ''"
-    let mut params: Vec<String> = vec![];
-
-    if let Some(src) = source_filter {
-        where_parts.push("source = ?".to_string());
-        params.push(src.to_string());
-    }
-
-    let sql = format!("SELECT * FROM events WHERE {}", where_parts.join(" AND "));
-    let mut stmt = conn.prepare(&sql)?;
-
-    let col_names: Vec<String> = (0..stmt.column_count())
-        .filter_map(|i| stmt.column_name(i).ok().map(str::to_string))
-        .collect();
-
-    let field_col = col_names.iter().position(|c| c == &filter.field);
-    let raw_file_col = col_names.iter().position(|c| c == "raw_file");
-    let byte_offset_col = col_names.iter().position(|c| c == "byte_offset");
-
-    let param_refs: Vec<&dyn rusqlite::ToSql> =
-        params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-
-    let mut rows = stmt.query(param_refs.as_slice())?;
-    let mut count = 0;
-
-    while let Some(row) = rows.next()? {
-        let ip_val: String = field_col
-            .and_then(|i| row.get::<_, String>(i).ok())
-            .unwrap_or_default();
-
-        if !cidr_contains(&filter.value, &ip_val).unwrap_or(false) {
-            continue;
-        }
-
-        emit_row(row, &col_names, raw_file_col, byte_offset_col, data_dir, full, renderer);
-        count += 1;
-        if renderer.is_done() { break; }
-    }
-    Ok(count)
-}
-
-/// Run `SELECT f1,f2,…, COUNT(*) FROM events [WHERE source = ?] GROUP BY f1,f2,…`
-/// against a single bucket and fold the counts into `acc`, keyed by the ordered
-/// group-field values (NULL rendered as empty string). Because each bucket is a
-/// separate DB, the caller calls this once per bucket against a shared `acc` to
-/// merge counts across the whole time range.
+/// Run a compiled group-mode query (`SELECT f1,…, COUNT(*) … GROUP BY f1,…`)
+/// against one open bucket connection and fold the counts into `acc`, keyed by
+/// the ordered group-field values (NULL rendered as empty string). Because each
+/// bucket is a separate DB, the executor calls this once per bucket against a
+/// shared `acc` to merge counts across the whole time range.
 ///
-/// `fields` must already be validated as safe SQL identifiers by the caller
-/// (they are interpolated into the query, not bound).
-pub fn group_bucket(
-    db_path: &Path,
-    fields: &[String],
-    source_filter: Option<&str>,
+/// `n_fields` is the number of leading group columns (the trailing column is the
+/// `COUNT(*)`). The group fields are interpolated into `sql` by the compiler and
+/// must already be validated as safe SQL identifiers.
+pub fn fold_group_sql(
+    conn: &Connection,
+    sql: &str,
+    params: &[String],
+    n_fields: usize,
     acc: &mut BTreeMap<Vec<String>, u64>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> rusqlite::Result<()> {
     use rusqlite::types::ValueRef;
 
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-
-    let cols = fields.join(", ");
-    let (where_clause, params): (String, Vec<String>) = match source_filter {
-        Some(src) => (" WHERE source = ?".to_string(), vec![src.to_string()]),
-        None => (String::new(), vec![]),
-    };
-    let sql = format!("SELECT {cols}, COUNT(*) FROM events{where_clause} GROUP BY {cols}");
-
-    let mut stmt = conn.prepare(&sql)?;
-    let n = fields.len();
+    let mut stmt = conn.prepare(sql)?;
+    let n = n_fields;
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
     let mut rows = stmt.query(param_refs.as_slice())?;
@@ -436,45 +353,6 @@ mod tests {
         assert!(!cidr_contains("10.0.0.0/24", "").unwrap());
     }
 
-    // ── FieldFilter::parse |cidr ──────────────────────────────────────────
-
-    #[test]
-    fn parse_cidr_modifier() {
-        let f = FieldFilter::parse("src_ip|cidr", "10.0.0.0/24");
-        assert_eq!(f.field, "src_ip");
-        assert_eq!(f.mode, MatchMode::Cidr);
-        assert_eq!(f.value, "10.0.0.0/24");
-        assert_eq!(f.base_field(), "src_ip");
-    }
-
-    #[test]
-    fn cidr_sql_predicate_fetches_non_empty() {
-        let f = FieldFilter::parse("src_ip|cidr", "10.0.0.0/24");
-        assert_eq!(f.sql_predicate(), "src_ip != ''");
-    }
-
-    // ── FieldFilter::parse |any ───────────────────────────────────────────
-
-    #[test]
-    fn parse_any_modifier() {
-        let f = FieldFilter::parse("username|any", "");
-        assert_eq!(f.field, "username");
-        assert_eq!(f.mode, MatchMode::Any);
-        assert_eq!(f.base_field(), "username");
-    }
-
-    #[test]
-    fn any_sql_predicate_is_not_empty() {
-        let f = FieldFilter::parse("username|any", "");
-        assert_eq!(f.sql_predicate(), "username != ''");
-    }
-
-    #[test]
-    fn any_sql_pattern_is_empty() {
-        let f = FieldFilter::parse("username|any", "");
-        assert_eq!(f.sql_pattern(), "");
-    }
-
     // ── resolve_raw_line ──────────────────────────────────────────────────
 
     use std::fs;
@@ -541,7 +419,26 @@ mod tests {
         assert_eq!(result, "{\"x\":1}");
     }
 
-    // ── group_bucket ──────────────────────────────────────────────────────
+    // ── grouping (fold_group_sql) ─────────────────────────────────────────
+
+    /// Test helper: open a bucket read-only and fold one bucket's grouped counts
+    /// into `acc`, mirroring what the executor builds via the query compiler.
+    fn group(
+        db_path: &Path,
+        fields: &[String],
+        source: Option<&str>,
+        acc: &mut BTreeMap<Vec<String>, u64>,
+    ) {
+        let conn =
+            Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let cols = fields.join(", ");
+        let (where_clause, params): (String, Vec<String>) = match source {
+            Some(s) => (" WHERE source = ?".to_string(), vec![s.to_string()]),
+            None => (String::new(), vec![]),
+        };
+        let sql = format!("SELECT {cols}, COUNT(*) FROM events{where_clause} GROUP BY {cols}");
+        fold_group_sql(&conn, &sql, &params, fields.len(), acc).unwrap();
+    }
 
     /// Build a minimal index bucket with an `events(src_ip, dst_ip, source)`
     /// table populated from `rows`.
@@ -581,8 +478,8 @@ mod tests {
 
         let fields = vec!["src_ip".to_string()];
         let mut acc = BTreeMap::new();
-        group_bucket(&db1, &fields, None, &mut acc).unwrap();
-        group_bucket(&db2, &fields, None, &mut acc).unwrap();
+        group(&db1, &fields, None, &mut acc);
+        group(&db2, &fields, None, &mut acc);
 
         assert_eq!(acc.get(&key(&["10.0.0.1"])), Some(&3)); // 2 in db1 + 1 in db2
         assert_eq!(acc.get(&key(&["10.0.0.2"])), Some(&1));
@@ -604,8 +501,8 @@ mod tests {
 
         let fields = vec!["src_ip".to_string(), "dst_ip".to_string()];
         let mut acc = BTreeMap::new();
-        group_bucket(&db1, &fields, None, &mut acc).unwrap();
-        group_bucket(&db2, &fields, None, &mut acc).unwrap();
+        group(&db1, &fields, None, &mut acc);
+        group(&db2, &fields, None, &mut acc);
 
         assert_eq!(acc.get(&key(&["10.0.0.1", "192.168.0.1"])), Some(&3)); // 2 + 1
         assert_eq!(acc.get(&key(&["10.0.0.1", "192.168.0.2"])), Some(&1));
@@ -624,7 +521,7 @@ mod tests {
 
         let fields = vec!["src_ip".to_string()];
         let mut acc = BTreeMap::new();
-        group_bucket(&db, &fields, Some("sshd"), &mut acc).unwrap();
+        group(&db, &fields, Some("sshd"), &mut acc);
 
         assert_eq!(acc.get(&key(&["10.0.0.1"])), Some(&1)); // sudo row excluded
         assert_eq!(acc.get(&key(&["10.0.0.2"])), Some(&1));
@@ -643,9 +540,137 @@ mod tests {
 
         let fields = vec!["src_ip".to_string()];
         let mut acc = BTreeMap::new();
-        group_bucket(&db, &fields, None, &mut acc).unwrap();
+        group(&db, &fields, None, &mut acc);
 
         assert_eq!(acc.get(&key(&[""])), Some(&1));
         assert_eq!(acc.get(&key(&["10.0.0.1"])), Some(&1));
+    }
+
+    // ── UDFs: cidr_match / raw_contains ──────────────────────────────────────
+
+    /// Build a bucket + matching raw `.jsonl` so `raw_contains` can resolve the
+    /// row's original line. Each row stores `(src_ip, raw_file, byte_offset)`,
+    /// where byte_offset points at the JSON line in `raw.jsonl`.
+    fn make_udf_bucket(dir: &Path) -> std::path::PathBuf {
+        let raw_dir = dir.join("raw");
+        fs::create_dir_all(&raw_dir).unwrap();
+        let lines = [
+            "{\"src_ip\":\"10.0.0.1\",\"msg\":\"Failed password for root\"}\n",
+            "{\"src_ip\":\"192.168.1.5\",\"msg\":\"Accepted publickey\"}\n",
+        ];
+        let mut content = String::new();
+        let mut offsets = Vec::new();
+        for l in &lines {
+            offsets.push(content.len() as i64);
+            content.push_str(l);
+        }
+        fs::write(raw_dir.join("sshd.jsonl"), &content).unwrap();
+
+        let db = dir.join("2026-06-22-08.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (src_ip TEXT, raw_file TEXT, byte_offset INTEGER);",
+        )
+        .unwrap();
+        for (i, off) in offsets.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO events (src_ip, raw_file, byte_offset) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    if i == 0 { "10.0.0.1" } else { "192.168.1.5" },
+                    "raw/sshd.jsonl",
+                    off
+                ],
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn scalar_count(conn: &Connection, sql: &str, params: &[&str]) -> i64 {
+        let refs: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        conn.query_row(sql, refs.as_slice(), |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn raw_contains_matches_and_misses() {
+        let tmp = TempDir::new();
+        let db = make_udf_bucket(&tmp.path);
+        let conn = open_bucket_conn(&db, &tmp.path).unwrap();
+
+        // Matches the first row's raw line only.
+        assert_eq!(
+            scalar_count(
+                &conn,
+                "SELECT COUNT(*) FROM events WHERE raw_contains(raw_file, byte_offset, ?)",
+                &["Failed password"],
+            ),
+            1
+        );
+        // Matches both rows on "src_ip".
+        assert_eq!(
+            scalar_count(
+                &conn,
+                "SELECT COUNT(*) FROM events WHERE raw_contains(raw_file, byte_offset, ?)",
+                &["src_ip"],
+            ),
+            2
+        );
+        // No match.
+        assert_eq!(
+            scalar_count(
+                &conn,
+                "SELECT COUNT(*) FROM events WHERE raw_contains(raw_file, byte_offset, ?)",
+                &["nonexistent-needle"],
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn raw_contains_missing_file_returns_false() {
+        let tmp = TempDir::new();
+        let db = tmp.path.join("2026-06-22-08.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (raw_file TEXT, byte_offset INTEGER);
+             INSERT INTO events VALUES ('raw/missing.jsonl', 0);
+             INSERT INTO events VALUES ('', 0);",
+        )
+        .unwrap();
+        drop(conn);
+        let conn = open_bucket_conn(&db, &tmp.path).unwrap();
+        // Missing file and empty raw_file both resolve to no-match (not error).
+        assert_eq!(
+            scalar_count(
+                &conn,
+                "SELECT COUNT(*) FROM events WHERE raw_contains(raw_file, byte_offset, ?)",
+                &["anything"],
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn cidr_match_udf_filters_by_range() {
+        let tmp = TempDir::new();
+        let db = make_udf_bucket(&tmp.path);
+        let conn = open_bucket_conn(&db, &tmp.path).unwrap();
+
+        // 10.0.0.1 is in 10.0.0.0/8; 192.168.1.5 is not.
+        assert_eq!(
+            scalar_count(&conn, "SELECT COUNT(*) FROM events WHERE cidr_match(src_ip, ?)", &["10.0.0.0/8"]),
+            1
+        );
+        // /0 matches every valid IPv4.
+        assert_eq!(
+            scalar_count(&conn, "SELECT COUNT(*) FROM events WHERE cidr_match(src_ip, ?)", &["0.0.0.0/0"]),
+            2
+        );
+        // Malformed CIDR → false for every row (defensive net).
+        assert_eq!(
+            scalar_count(&conn, "SELECT COUNT(*) FROM events WHERE cidr_match(src_ip, ?)", &["bogus"]),
+            0
+        );
     }
 }

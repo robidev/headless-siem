@@ -72,4 +72,4 @@ FOUND=$(find "$TMPDIR" -name "alerts.jsonl" 2>/dev/null | head -1)
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
-[ "$FAIL" -gt 0 ] && exit 1
+[ "$FAIL" -gt 0 ] && exit 1; exit 0

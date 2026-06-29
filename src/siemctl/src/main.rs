@@ -1,5 +1,6 @@
 mod db;
 mod normconfig;
+mod query;
 mod render;
 mod sources;
 mod time;
@@ -284,70 +285,39 @@ fn count_dir_size(dir: &Path, total: &mut u64) {
 
 fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
     let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
-    let mut field_arg: Option<String> = None;
-    let mut value: Option<String> = None;
-    let mut query: Option<String> = None;
-    let mut source: Option<String> = None;
+    let mut dsl: Option<String> = None;
+    let mut raw: Option<Option<String>> = None; // Some(None)=--raw no arg; Some(Some(s))=--raw SUBSTRING
     let mut after: Option<time::HourBucket> = None;
     let mut before: Option<time::HourBucket> = None;
-    let mut full = true;
-    let mut record_flag_set = false;
-    let mut group: Option<Vec<String>> = None;
-    let mut render_fields: Option<Vec<String>> = None;
     let mut format = render::Format::Json;
-    let mut limit: Option<usize> = None;
 
-    let mut it = args.iter().map(String::as_str);
+    let mut it = args.iter().map(String::as_str).peekable();
     while let Some(arg) = it.next() {
         match arg {
             "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
-            "--field" | "-f" => field_arg = Some(next_arg(&mut it, arg)?.to_string()),
-            "--value" | "-v" => value = Some(next_arg(&mut it, arg)?.to_string()),
-            "--query" | "-q" => query = Some(next_arg(&mut it, arg)?.to_string()),
-            "--source" | "-s" => source = Some(next_arg(&mut it, arg)?.to_string()),
-            "--full" => { full = true; record_flag_set = true; }
-            "--index-record" => { full = false; record_flag_set = true; }
-            "--group" | "-g" => {
-                let fields: Vec<String> = next_arg(&mut it, arg)?
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .collect();
-                if fields.is_empty() {
-                    return Err("--group requires at least one field name".into());
-                }
-                group = Some(fields);
-            }
-            "--render" => {
-                let fields: Vec<String> = next_arg(&mut it, arg)?
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .collect();
-                if fields.is_empty() {
-                    return Err("--render requires at least one field name".into());
-                }
-                render_fields = Some(fields);
+            "--query" | "-q" => dsl = Some(next_arg(&mut it, arg)?.to_string()),
+            "--raw" => {
+                // Optional substring argument: consume the next token unless it
+                // is another flag.
+                let sub = match it.peek() {
+                    Some(s) if !s.starts_with('-') => Some(it.next().unwrap().to_string()),
+                    _ => None,
+                };
+                raw = Some(sub);
             }
             "--format" => format = render::Format::parse(next_arg(&mut it, arg)?)?,
-            "--limit" | "-l" => {
-                let s = next_arg(&mut it, arg)?;
-                limit = Some(s.parse::<usize>().map_err(|_| format!("--limit: invalid number '{s}'"))?);
-            }
             "--after" | "-a" => {
                 let s = next_arg(&mut it, arg)?;
                 after = Some(
                     time::HourBucket::parse(s)
-                        .ok_or_else(|| format!("invalid --after '{s}' (YYYY-MM-DDTHH)"))?
+                        .ok_or_else(|| format!("invalid --after '{s}' (YYYY-MM-DDTHH)"))?,
                 );
             }
             "--before" | "-b" => {
                 let s = next_arg(&mut it, arg)?;
                 before = Some(
                     time::HourBucket::parse(s)
-                        .ok_or_else(|| format!("invalid --before '{s}' (YYYY-MM-DDTHH)"))?
+                        .ok_or_else(|| format!("invalid --before '{s}' (YYYY-MM-DDTHH)"))?,
                 );
             }
             "--help" | "-h" => {
@@ -365,281 +335,82 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
         return Err(format!("data directory not found: {}", data_dir.display()).into());
     }
 
-    if let Some(group_fields) = &group {
-        if record_flag_set {
-            return Err("--group cannot be combined with --full/--index-record \
-                        (grouping returns aggregate counts, not log records)".into());
-        }
-        if field_arg.is_some() || query.is_some() {
-            return Err("--group cannot be combined with --field/--query \
-                        (grouping is a standalone aggregate over the index)".into());
-        }
-        for f in group_fields {
-            if !is_sql_ident(f) {
-                return Err(format!("--group: invalid field name '{f}' \
-                    (only letters, digits and underscore allowed)").into());
-            }
-            if !valid_fields.is_empty() && !valid_fields.contains(f) {
-                let mut known: Vec<_> = valid_fields.iter().map(String::as_str).collect();
-                known.sort_unstable();
-                return Err(format!(
-                    "--group: unknown field '{f}'. Known fields: {}",
-                    known.join(", ")
-                ).into());
-            }
+    // --raw: bypass the index, scan raw files directly (legacy grep/dump). The
+    // argument, if any, is a literal substring — never parsed as DSL.
+    if let Some(sub) = raw {
+        if dsl.is_some() {
+            return Err("--raw and --query are mutually exclusive (--raw takes a literal \
+                        substring, not a DSL expression)"
+                .into());
         }
         let mut renderer =
-            render::Renderer::new(format, render_fields, io::BufWriter::new(io::stdout()), limit);
-        let rc = search_group(&data_dir, group_fields, source.as_deref(), after, before, &mut renderer);
+            render::Renderer::new(format, None, io::BufWriter::new(io::stdout()), None);
+        let rc = match sub {
+            Some(needle) => search_by_grep(&data_dir, &needle, None, after, before, &mut renderer),
+            None => search_dump(&data_dir, None, after, before, &mut renderer),
+        };
         renderer.flush().ok();
         return rc;
     }
 
-    if let Some(fa) = &field_arg {
-        let uses_any = fa.ends_with("|any");
-        if !uses_any && value.is_none() {
-            eprint!("siemctl: --field requires --value (or use |any modifier to match any non-empty value)");
-            if !valid_fields.is_empty() {
-                let mut known: Vec<_> = valid_fields.iter().map(String::as_str).collect();
-                known.sort_unstable();
-                eprint!("\n         available fields: {}", known.join(", "));
-            }
-            eprintln!();
-            return Ok(1);
-        }
-        let filter = db::FieldFilter::parse(fa, value.as_deref().unwrap_or(""));
-        // The base field is interpolated into the SQL predicate (column names
-        // can't be bound), so reject anything that isn't a plain identifier —
-        // this guards the path even when sources.toml is absent and the
-        // valid_fields check below is skipped.
-        if !is_sql_ident(filter.base_field()) {
-            eprintln!(
-                "siemctl: invalid field name '{}' (only letters, digits and underscore allowed)",
-                filter.base_field()
-            );
-            return Ok(1);
-        }
-        // Validate that the base field is a known indexed field
-        if !valid_fields.is_empty() && !valid_fields.contains(filter.base_field()) {
-            let mut known: Vec<_> = valid_fields.iter().map(String::as_str).collect();
-            known.sort_unstable();
-            eprintln!(
-                "siemctl: unknown field '{}'. Known fields: {}",
-                filter.base_field(),
-                known.join(", ")
-            );
-            return Ok(1);
-        }
-        let mut renderer =
-            render::Renderer::new(format, render_fields, io::BufWriter::new(io::stdout()), limit);
-        let rc = search_by_index(&data_dir, &filter, source.as_deref(), after, before, full, &mut renderer);
-        renderer.flush().ok();
-        rc
-    } else if let Some(q) = &query {
-        let mut renderer =
-            render::Renderer::new(format, render_fields, io::BufWriter::new(io::stdout()), limit);
-        let rc = search_by_grep(&data_dir, q, source.as_deref(), after, before, &mut renderer);
-        renderer.flush().ok();
-        rc
-    } else if source.is_some() || after.is_some() || before.is_some() {
-        let mut renderer =
-            render::Renderer::new(format, render_fields, io::BufWriter::new(io::stdout()), limit);
-        let rc = search_dump(&data_dir, source.as_deref(), after, before, &mut renderer);
-        renderer.flush().ok();
-        rc
-    } else {
-        eprintln!("siemctl search: specify --field/--value, --query, or --source/--after/--before");
-        print_search_help();
-        Ok(1)
-    }
+    // Index-driven path: parse the DSL (empty/absent => match-all) into a Query,
+    // attach the time-range bounds, and execute.
+    let mut q = query::Query::parse(dsl.as_deref().unwrap_or(""), valid_fields)
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("invalid --query: {e}").into() })?;
+    q.after = after;
+    q.before = before;
+
+    let mut renderer =
+        render::Renderer::new(format, None, io::BufWriter::new(io::stdout()), q.limit);
+    let rc = query::run_query(&data_dir, &q, &mut renderer);
+    renderer.flush().ok();
+    rc
 }
 
 fn print_search_help() {
     println!(
-        "Usage: siemctl search [OPTIONS]\n\
+        "Usage: siemctl search [--query \"<dsl>\"] [OPTIONS]\n\
+         \n\
+         Searches the SQLite index. The entire predicate, grouping and limit is a\n\
+         single SQL-ish expression passed to --query. Quotes are optional and\n\
+         keywords are case-insensitive.\n\
          \n\
          Options:\n\
-         \x20 --data-dir DIR         Data directory (default: ./data)\n\
-         \x20 --field FIELD[|mod]    Indexed field to search (from sources.toml)\n\
-         \x20                        Modifiers: |startswith  |endswith  |contains  |cidr  |any\n\
-         \x20 --value VAL            Value to match (not needed with |any)\n\
-         \x20 --query TEXT           Full-text substring search on raw JSONL\n\
-         \x20 --source SRC           Filter by source name\n\
-         \x20 --after  YYYY-MM-DDTHH Start of time range\n\
-         \x20 --before YYYY-MM-DDTHH End of time range\n\
-         \x20 --index-record          Print only indexed fields (not the original log line)\n\
-         \x20 --full                 Alias for full-record mode (default; kept for compat)\n\
-         \x20 --group f1,f2,...      Count unique combinations of indexed fields\n\
-         \x20                        (aggregate mode; not combinable with --field/--query\n\
-         \x20                        /--full/--index-record). Sorted by count desc.\n\
-         \x20 --limit N              Stop after N hits across all buckets/files\n\
-         \x20 --render f1,f2,...     Output only these fields, in this order\n\
-         \x20                        (default: all fields)\n\
+         \x20 --query \"<dsl>\"        Predicate / GROUP BY / LIMIT expression (see DSL below)\n\
+         \x20 --raw [SUBSTRING]      Bypass the index; substring/range scan over raw files.\n\
+         \x20                        Escape hatch when the index is missing/stale or you need\n\
+         \x20                        the very latest, not-yet-indexed events. No DSL parsing.\n\
+         \x20 --after  YYYY-MM-DDTHH Start of time range (bucket pruning)\n\
+         \x20 --before YYYY-MM-DDTHH End of time range (bucket pruning)\n\
          \x20 --format FMT           Output format: json (default), tsv, tsv-noheader\n\
+         \x20 --data-dir DIR         Data directory (default: ./data)\n\
          \x20 --help                 Show this help\n\
          \n\
+         DSL grammar:\n\
+         \x20 query   := [WHERE] [expr] [GROUP BY f1,f2,...] [LIMIT n]\n\
+         \x20 expr    := AND / OR / NOT / ( ) over comparisons and functions\n\
+         \x20 compare := field (== | = | != | <>) value\n\
+         \x20 funcs   := startswith(f,'v')  endswith(f,'v')  contains(f,'v')\n\
+         \x20            any(f)  cidr_match(f,'a.b.c.d/n')  raw_contains('needle')\n\
+         \x20 AND binds tighter than OR; use parentheses to override.\n\
+         \n\
          Examples:\n\
-         \x20 siemctl search --field src_ip --value 10.0.0.5\n\
-         \x20 siemctl search --field src_ip --value 10.0.0.5 --index-record\n\
-         \x20 siemctl search --field username|any\n\
-         \x20 siemctl search --field src_ip|cidr --value 10.0.0.0/24\n\
-         \x20 siemctl search --field event_type|startswith --value ssh\n\
-         \x20 siemctl search --query \"Failed password\" --source sshd\n\
-         \x20 siemctl search --source sshd --after 2026-06-22T08 --before 2026-06-22T10\n\
-         \x20 siemctl search --field src_ip|any --render timestamp,src_ip,username --format tsv\n\
-         \x20 siemctl search --group src_ip\n\
-         \x20 siemctl search --group src_ip,dst_ip --source sshd --format tsv"
+         \x20 siemctl search --query \"src_ip == 10.0.0.5\"\n\
+         \x20 siemctl search --query \"any(username)\" --format tsv\n\
+         \x20 siemctl search --query \"cidr_match(src_ip,'10.0.0.0/24')\"\n\
+         \x20 siemctl search --query \"startswith(event_type,'ssh')\"\n\
+         \x20 siemctl search --query \"source == sshd AND raw_contains('Failed password')\"\n\
+         \x20 siemctl search --query \"source == sshd GROUP BY src_ip\"\n\
+         \x20 siemctl search --query \"GROUP BY src_ip,dst_ip\" --after 2026-06-22T08\n\
+         \x20 siemctl search --raw 'Failed password' --after 2026-06-22T08\n\
+         \x20 siemctl search --after 2026-06-22T08 --before 2026-06-22T10"
     );
 }
 
-/// Search SQLite index buckets; fall back to grep if no index exists.
-fn search_by_index<W: io::Write>(
-    data_dir: &Path,
-    filter: &db::FieldFilter,
-    source: Option<&str>,
-    after: Option<time::HourBucket>,
-    before: Option<time::HourBucket>,
-    full: bool,
-    renderer: &mut render::Renderer<W>,
-) -> Result<i32> {
-    let idx_dir = data_dir.join("index");
-    if !idx_dir.is_dir() {
-        return Err(
-            "no index directory found — run 'indexd' to build the index first, \
-             or use --query for full-text search"
-                .into(),
-        );
-    }
-
-    let mut dbs: Vec<PathBuf> = fs::read_dir(&idx_dir)?
-        .flatten()
-        .filter(|e| e.path().extension().map(|x| x == "db").unwrap_or(false))
-        .map(|e| e.path())
-        .collect();
-    dbs.sort();
-
-    if dbs.is_empty() {
-        return Err(
-            "index directory exists but contains no buckets — run 'indexd' to index your logs, \
-             or use --query for full-text search"
-                .into(),
-        );
-    }
-
-    let mut total = 0usize;
-    for db_path in &dbs {
-        // Time-range filter: skip buckets outside [after, before]
-        if let Some(name) = db_path.file_name().and_then(|n| n.to_str()) {
-            if let Some(bkt) = time::HourBucket::from_filename(name) {
-                if after.map(|a| bkt < a).unwrap_or(false) {
-                    continue;
-                }
-                if before.map(|b| bkt > b).unwrap_or(false) {
-                    continue;
-                }
-            }
-        }
-
-        match db::query_bucket(db_path, filter, source, Some(data_dir), full, renderer) {
-            Ok(n) => total += n,
-            Err(e) => {
-                let msg = e.to_string();
-                // Silently skip buckets that don't have the requested column
-                if !msg.contains("no such column") && !msg.contains("no such table") {
-                    eprintln!("siemctl: {}: {e}", db_path.display());
-                }
-            }
-        }
-        if renderer.is_done() { break; }
-    }
-
-    if total == 0 {
-        eprintln!("siemctl: no matches found");
-        return Ok(1);
-    }
-    Ok(0)
-}
-
-/// Group indexed events by one or more fields, emitting unique combinations and
-/// their counts (sorted by count desc, then key asc). Each bucket is a separate
-/// SQLite DB, so counts are computed per-bucket and merged in Rust.
-fn search_group<W: io::Write>(
-    data_dir: &Path,
-    fields: &[String],
-    source: Option<&str>,
-    after: Option<time::HourBucket>,
-    before: Option<time::HourBucket>,
-    renderer: &mut render::Renderer<W>,
-) -> Result<i32> {
-    let idx_dir = data_dir.join("index");
-    if !idx_dir.is_dir() {
-        return Err(
-            "no index directory found — run 'indexd' to build the index first".into(),
-        );
-    }
-
-    let mut dbs: Vec<PathBuf> = fs::read_dir(&idx_dir)?
-        .flatten()
-        .filter(|e| e.path().extension().map(|x| x == "db").unwrap_or(false))
-        .map(|e| e.path())
-        .collect();
-    dbs.sort();
-
-    if dbs.is_empty() {
-        return Err(
-            "index directory exists but contains no buckets — run 'indexd' to index your logs".into(),
-        );
-    }
-
-    let mut acc: std::collections::BTreeMap<Vec<String>, u64> = std::collections::BTreeMap::new();
-    for db_path in &dbs {
-        // Time-range filter: skip buckets outside [after, before]
-        if let Some(name) = db_path.file_name().and_then(|n| n.to_str()) {
-            if let Some(bkt) = time::HourBucket::from_filename(name) {
-                if after.map(|a| bkt < a).unwrap_or(false) {
-                    continue;
-                }
-                if before.map(|b| bkt > b).unwrap_or(false) {
-                    continue;
-                }
-            }
-        }
-        if let Err(e) = db::group_bucket(db_path, fields, source, &mut acc) {
-            let msg = e.to_string();
-            // Silently skip buckets missing the requested column/table
-            if !msg.contains("no such column") && !msg.contains("no such table") {
-                eprintln!("siemctl: {}: {e}", db_path.display());
-            }
-        }
-    }
-
-    if acc.is_empty() {
-        eprintln!("siemctl: no matches found");
-        return Ok(1);
-    }
-
-    // Sort by count descending, breaking ties by the group key ascending.
-    let mut entries: Vec<(Vec<String>, u64)> = acc.into_iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-    for (key, count) in entries {
-        let mut rec: render::Record = Vec::with_capacity(fields.len() + 1);
-        for (f, v) in fields.iter().zip(key.iter()) {
-            rec.push((f.clone(), render::Val::Str(v.clone())));
-        }
-        rec.push(("count".to_string(), render::Val::Int(count as i64)));
-        let _ = renderer.emit_record(&rec);
-        if renderer.is_done() {
-            break;
-        }
-    }
-    Ok(0)
-}
-
 /// True if `s` is a safe bare SQL identifier (letters/digits/underscore, not
-/// starting with a digit). Used to guard `--group` field names that are
-/// interpolated into the GROUP BY query rather than bound as parameters.
-fn is_sql_ident(s: &str) -> bool {
+/// starting with a digit). Used to guard field/group identifiers that are
+/// interpolated into the compiled SQL rather than bound as parameters.
+pub(crate) fn is_sql_ident(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}

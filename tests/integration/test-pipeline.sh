@@ -250,17 +250,21 @@ check "Status shows indexed buckets" grep -q "Indexed buckets" <<< "$STATUS_OUT"
 # ── Step 8: siemctl search ────────────────────────────────────────────
 info "=== Step 8: siemctl search ==="
 
-# Search by field (index-assisted)
-SEARCH_FIELD_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --field src_ip --value "10.0.0.5" 2>&1) || true
-check "siemctl search --field src_ip returns results" test -n "$SEARCH_FIELD_OUT"
+# Field predicate via the DSL (index-driven)
+SEARCH_FIELD_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "src_ip == 10.0.0.5" 2>&1) || true
+check "siemctl search field predicate returns results" test -n "$SEARCH_FIELD_OUT"
 
-# Search by query (grep on normalized JSONL — use a value that appears in the JSON)
-SEARCH_QUERY_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "10.0.0.5" 2>&1) || true
-check "siemctl search --query returns results" test -n "$SEARCH_QUERY_OUT"
+# Text predicate via raw_contains (index-driven full-text)
+SEARCH_QUERY_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "raw_contains('10.0.0.5')" 2>&1) || true
+check "siemctl search raw_contains returns results" test -n "$SEARCH_QUERY_OUT"
 
-# Search by source + time range
-SEARCH_SOURCE_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --source sshd --after "2026-06-22T08:00" --before "2026-06-22T09:00" 2>&1) || true
-check "siemctl search --source with time range returns results" test -n "$SEARCH_SOURCE_OUT"
+# Composed: source predicate + time-range bucket pruning
+SEARCH_SOURCE_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "source == sshd" --after "2026-06-22T08" --before "2026-06-22T09" 2>&1) || true
+check "siemctl search source predicate with time range returns results" test -n "$SEARCH_SOURCE_OUT"
+
+# --raw escape hatch: literal substring scan straight over raw files
+SEARCH_RAW_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --raw "10.0.0.5" 2>&1) || true
+check "siemctl search --raw returns results" test -n "$SEARCH_RAW_OUT"
 
 # ── Step 9: Cleanup ──────────────────────────────────────────────────
 info "=== Step 9: Cleanup ==="

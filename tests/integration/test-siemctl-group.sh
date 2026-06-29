@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# ── siemctl search --group integration test (T7) ──────────────────────────
-# Demonstrates `siemctl search --group f1,f2`: it counts unique combinations
-# of indexed fields, merging counts across the per-hour SQLite buckets, and
-# emits the result through the shared render layer (so --format / --render /
-# --limit all apply).
+# ── siemctl search GROUP BY integration test ──────────────────────────────
+# Demonstrates `siemctl search --query "GROUP BY f1,f2"`: it counts unique
+# combinations of indexed fields, merging counts across the per-hour SQLite
+# buckets, and emits the result through the shared render layer (so --format /
+# --limit apply). Also exercises the new "filter then group" capability.
 #
 # The demonstration data is tests/fixtures/mixed.log run through the real
 # pipeline (normalized → indexd). In that fixture only the `source` column is
@@ -61,7 +61,7 @@ done
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT
 
-echo "=== siemctl --group Integration Test ==="
+echo "=== siemctl GROUP BY Integration Test ==="
 echo ""
 
 # ── Build the index from the fixture (normalized → indexd) ────────────────
@@ -85,13 +85,13 @@ find "$TEST_DIR/index" -name '*.db' -printf '      %f\n' | sort
 echo ""
 
 # ── 1. Single-field grouping, counts merged across buckets ────────────────
-echo "[1] --group source  (sshd spans 2 buckets → must report 10)"
+echo "[1] GROUP BY source  (sshd spans 2 buckets → must report 10)"
 demo_contains "sshd count merged across buckets = 10" '{"source":"sshd","count":10}' \
-    "$SIEMCTL" search --data-dir "$TEST_DIR" --group source
+    "$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source"
 echo ""
 
 echo "[2] other source counts are present"
-GROUP_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --group source 2>&1)" || true
+GROUP_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source" 2>&1)" || true
 for kv in '"source":"iptables","count":6' '"source":"systemd","count":5' '"source":"sudo","count":4'; do
     grep -qF -- "$kv" <<< "$GROUP_OUT" && pass "contains $kv" || fail "count" "missing $kv"
 done
@@ -107,45 +107,48 @@ echo "      first line: $FIRST_LINE"
 echo ""
 
 # ── 4. TSV format: header + a count column ────────────────────────────────
-echo "[4] --group source --format tsv"
+echo '[4] GROUP BY source --format tsv'
 demo_contains "tsv header is 'source<TAB>count'" "$(printf 'source\tcount')" \
-    "$SIEMCTL" search --data-dir "$TEST_DIR" --group source --format tsv
+    "$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source" --format tsv
 echo ""
 
-# ── 5. --limit caps the number of group rows emitted ──────────────────────
-echo "[5] --group source --limit 2  (top 2 only)"
-LIMIT_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --group source --limit 2 2>&1)" || true
+# ── 5. LIMIT caps the number of group rows emitted ────────────────────────
+echo '[5] GROUP BY source LIMIT 2  (top 2 only)'
+LIMIT_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source LIMIT 2" 2>&1)" || true
 echo "$LIMIT_OUT" | sed 's/^/      /'
 LIMIT_LINES=$(grep -c '"count"' <<< "$LIMIT_OUT")
-[ "$LIMIT_LINES" -eq 2 ] && pass "--limit 2 emits exactly 2 rows" \
-                         || fail "--limit" "expected 2 rows, got $LIMIT_LINES"
+[ "$LIMIT_LINES" -eq 2 ] && pass "LIMIT 2 emits exactly 2 rows" \
+                         || fail "LIMIT" "expected 2 rows, got $LIMIT_LINES"
 echo ""
 
-# ── 6. --render reorders the columns (group field + count) ────────────────
-echo "[6] --group source --render count,source --format tsv  (reordered)"
-demo_contains "render reorders to 'count<TAB>source'" "$(printf 'count\tsource')" \
-    "$SIEMCTL" search --data-dir "$TEST_DIR" --group source --render count,source --format tsv
+# ── 6. Filter then group (new capability: predicate + GROUP BY) ───────────
+echo '[6] source == sshd GROUP BY source  (filter then group)'
+FILTERED_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "source == sshd GROUP BY source" 2>&1)" || true
+echo "$FILTERED_OUT" | sed 's/^/      /'
+# Only the sshd combo survives the predicate, still counting 10 across buckets.
+{ [ "$(grep -c '"count"' <<< "$FILTERED_OUT")" -eq 1 ] \
+    && grep -qF -- '{"source":"sshd","count":10}' <<< "$FILTERED_OUT"; } \
+    && pass "predicate restricts grouping to sshd=10 only" \
+    || fail "filter-then-group" "unexpected output: $FILTERED_OUT"
 echo ""
 
 # ── 7. Two-field grouping works; total across combos = 25 events ──────────
-echo "[7] --group source,event_type  (multi-field SQL + merge)"
-TWO_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --group source,event_type 2>&1)" || true
+echo '[7] GROUP BY source, event_type  (multi-field SQL + merge)'
+TWO_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source, event_type" 2>&1)" || true
 echo "$TWO_OUT" | sed 's/^/      /'
 TWO_TOTAL=$(grep -oE '"count":[0-9]+' <<< "$TWO_OUT" | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')
 [ "${TWO_TOTAL:-0}" -eq 25 ] && pass "combo counts sum to all 25 indexed events" \
                              || fail "two-field" "counts summed to ${TWO_TOTAL:-0}, expected 25"
 echo ""
 
-# ── 8. Error paths: --group is a standalone aggregate mode ─────────────────
+# ── 8. Error paths: DSL parse/validation rejects bad input ────────────────
 echo "[8] error paths"
-demo_rejects "rejects --group with --full" "cannot be combined with --full" \
-    "$SIEMCTL" search --data-dir "$TEST_DIR" --group source --full
-demo_rejects "rejects --group with --query" "cannot be combined with --field/--query" \
-    "$SIEMCTL" search --data-dir "$TEST_DIR" --group source --query foo
+demo_rejects "rejects an unknown function" "unknown function" \
+    "$SIEMCTL" search --data-dir "$TEST_DIR" --query "frobnicate(source,'x')"
 demo_rejects "rejects an unknown field" "unknown field" \
-    "$SIEMCTL" search --data-dir "$TEST_DIR" --group not_a_field
+    "$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY not_a_field"
 demo_rejects "rejects an unsafe field name (SQL-injection guard)" "invalid field name" \
-    "$SIEMCTL" search --data-dir "$TEST_DIR" --group 'src_ip;drop'
+    "$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY src_ip-drop"
 echo ""
 
 echo "=== Results: $PASS passed, $FAIL failed ==="
