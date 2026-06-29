@@ -2,7 +2,8 @@ mod config;
 mod db;
 mod parser;
 
-use inotify::{EventMask, Inotify, WatchMask};
+use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -378,13 +379,22 @@ fn main() {
 
     let watch_mask = WatchMask::CLOSE_WRITE | WatchMask::CREATE | WatchMask::MOVED_TO;
 
+    // Maps every watch descriptor to the directory path it watches.
+    // Event handlers use this to reconstruct the full path of a new
+    // file or directory without needing to search the filesystem.
+    let mut watch_paths: HashMap<WatchDescriptor, PathBuf> = HashMap::new();
+
     if raw_dir.exists() {
-        add_recursive_watches(&mut inotify, &raw_dir, watch_mask);
+        add_recursive_watches(&mut inotify, &raw_dir, watch_mask, &mut watch_paths);
     } else if data_dir.exists() {
-        inotify.watches().add(&data_dir, WatchMask::CREATE).unwrap_or_else(|e| {
-            eprintln!("[indexd] failed to watch {}: {}", data_dir.display(), e);
-            std::process::exit(1);
-        });
+        // raw/ doesn't exist yet — watch data/ until normalized creates it.
+        match inotify.watches().add(&data_dir, WatchMask::CREATE) {
+            Ok(wd) => { watch_paths.insert(wd, data_dir.clone()); }
+            Err(e) => {
+                eprintln!("[indexd] failed to watch {}: {}", data_dir.display(), e);
+                std::process::exit(1);
+            }
+        }
     }
 
     // ── Initial scan ──────────────────────────────────────────────────
@@ -446,11 +456,18 @@ fn main() {
         for event in events {
             if event.mask.contains(EventMask::CREATE) && event.mask.contains(EventMask::ISDIR) {
                 if let Some(name) = event.name {
-                    let new_dir = raw_dir.join(name);
+                    // Use the watch descriptor to find the exact parent directory.
+                    // Previously this always joined to raw_dir, which broke for any
+                    // directory level below data/raw/ (e.g. the month "06" dir was
+                    // joined to data/raw/ producing data/raw/06 instead of
+                    // data/raw/2026/06).
+                    let parent = watch_paths.get(&event.wd)
+                        .cloned()
+                        .unwrap_or_else(|| raw_dir.clone());
+                    let new_dir = parent.join(name);
                     if new_dir.exists() {
-                        add_recursive_watches(&mut inotify, &new_dir, watch_mask);
+                        add_recursive_watches(&mut inotify, &new_dir, watch_mask, &mut watch_paths);
                         eprintln!("[indexd] watching new directory: {}", new_dir.display());
-                        std::thread::sleep(std::time::Duration::from_millis(500));
                         let mut progress = ScanProgress::new();
                         scan_existing(&index_db, &new_dir, &data_dir, &shutdown, &mut progress);
                     }
@@ -464,7 +481,11 @@ fn main() {
                 if let Some(name) = event.name {
                     let path_str = name.to_string_lossy();
                     if path_str.ends_with(".jsonl") {
-                        let full_path = reconstruct_path(&raw_dir, &event, name);
+                        // Resolve the full path via the watch descriptor map; fall
+                        // back to the old filesystem search only if the wd is unknown.
+                        let full_path = watch_paths.get(&event.wd)
+                            .map(|parent| parent.join(name))
+                            .unwrap_or_else(|| reconstruct_path(&raw_dir, &event, name));
                         eprintln!("[indexd] indexing: {}", full_path.display());
                         match parser::index_file(&index_db, &full_path, &data_dir, 100) {
                             Ok((indexed, skipped)) => {
@@ -531,16 +552,27 @@ fn scan_existing(
 }
 
 /// Add recursive inotify watches for a directory tree.
-fn add_recursive_watches(inotify: &mut Inotify, dir: &Path, mask: WatchMask) {
-    if let Err(e) = inotify.watches().add(dir, mask) {
-        eprintln!("[indexd] failed to watch {}: {}", dir.display(), e);
-        return;
+/// Records every (WatchDescriptor → path) pair in `watch_paths` so that
+/// event handlers can resolve the full path of a newly created file or
+/// directory without guessing.
+fn add_recursive_watches(
+    inotify: &mut Inotify,
+    dir: &Path,
+    mask: WatchMask,
+    watch_paths: &mut HashMap<WatchDescriptor, PathBuf>,
+) {
+    match inotify.watches().add(dir, mask) {
+        Ok(wd) => { watch_paths.insert(wd, dir.to_path_buf()); }
+        Err(e) => {
+            eprintln!("[indexd] failed to watch {}: {}", dir.display(), e);
+            return;
+        }
     }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                add_recursive_watches(inotify, &path, mask);
+                add_recursive_watches(inotify, &path, mask, watch_paths);
             }
         }
     }

@@ -215,7 +215,7 @@ cmd_start() {
 
     [ "$fresh" -eq 1 ] && { info "Wiping $DATA_DIR"; rm -rf "$DATA_DIR"; }
 
-    mkdir -p "$PID_DIR" "$LOG_DIR" "$DATA_DIR"
+    mkdir -p "$PID_DIR" "$LOG_DIR" "$DATA_DIR/raw" "$DATA_DIR/index"
     make_dev_config
     open_pipes  # opens fd 7 (NORM_PIPE) and fd 8 (RULED_PIPE) in O_RDWR
 
