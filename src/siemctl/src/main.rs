@@ -420,6 +420,17 @@ fn print_verbose_status(data_dir: &Path) {
     }
 }
 
+/// Format a u64 with comma thousands separators: 1234567 → "1,234,567".
+fn fmt_n(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 { out.push(','); }
+        out.push(c);
+    }
+    out.chars().rev().collect()
+}
+
 fn count_dir_size(dir: &Path, total: &mut u64) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -496,9 +507,9 @@ fn cmd_stats(args: &[String]) -> Result<i32> {
 
     let dbs = match query::index_buckets(&data_dir) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("siemctl stats: {e}");
-            return Ok(1);
+        Err(_) => {
+            // No index yet — fall back to counting events from raw JSONL files.
+            return stats_from_raw(&data_dir, source.as_deref(), after, before);
         }
     };
 
@@ -553,18 +564,6 @@ fn cmd_stats(args: &[String]) -> Result<i32> {
             }
         }
     }
-
-    // Print results.
-    let fmt_n = |n: u64| -> String {
-        // Insert comma separators for readability.
-        let s = n.to_string();
-        let mut out = String::new();
-        for (i, c) in s.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 { out.push(','); }
-            out.push(c);
-        }
-        out.chars().rev().collect()
-    };
 
     if source.is_none() {
         println!("── Event counts by source {}", "─".repeat(25));
@@ -625,6 +624,53 @@ fn cmd_stats(args: &[String]) -> Result<i32> {
             "     —".to_string()
         };
         println!("  {:<24}  {:>10}  {}", field, fmt_n(count), pct);
+    }
+
+    Ok(0)
+}
+
+/// Fallback for `siemctl stats` when no index exists yet.
+/// Counts events by reading raw JSONL files directly. Field coverage is
+/// skipped (that requires indexed columns); a note is printed instead.
+fn stats_from_raw(
+    data_dir: &Path,
+    source: Option<&str>,
+    after: Option<time::HourBucket>,
+    before: Option<time::HourBucket>,
+) -> Result<i32> {
+    eprintln!(
+        "siemctl: no index found — counting events from raw JSONL files\n\
+         \x20        (field coverage requires the index; run 'indexd' to build it)"
+    );
+
+    let files = collect_raw_files(data_dir, source, after, before);
+    if files.is_empty() {
+        eprintln!("siemctl: no raw JSONL files found under {}", data_dir.display());
+        return Ok(1);
+    }
+
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for path in &files {
+        let src = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        let Ok(f) = fs::File::open(path) else { continue };
+        let n = BufReader::new(f).lines().count() as u64;
+        *counts.entry(src.to_string()).or_default() += n;
+    }
+
+    if let Some(src) = source {
+        let total: u64 = counts.values().sum();
+        println!("\n── {} — event count (raw files) {}", src, "─".repeat(18usize.saturating_sub(src.len())));
+        println!("  {:<24}  {:>10}", src, fmt_n(total));
+    } else {
+        println!("\n── Event counts by source (raw files) {}", "─".repeat(13));
+        let mut sorted: Vec<_> = counts.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        let grand_total: u64 = sorted.iter().map(|(_, c)| *c).sum();
+        for (src, count) in &sorted {
+            println!("  {:<24}  {:>10}", src, fmt_n(**count));
+        }
+        println!("  {}", "─".repeat(37));
+        println!("  {:<24}  {:>10}", "total", fmt_n(grand_total));
     }
 
     Ok(0)
