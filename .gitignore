@@ -1,5 +1,6 @@
 # Build artifacts
 target/
+bin/
 *.o
 *.a
 *.so
@@ -18,3 +19,5 @@ Thumbs.db
 
 # Editor (VS Code)
 .vscode/
+
+.git-credentials
