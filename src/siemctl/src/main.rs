@@ -361,7 +361,7 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
     q.before = before;
 
     let mut renderer =
-        render::Renderer::new(format, None, io::BufWriter::new(io::stdout()), q.limit);
+        render::Renderer::new(format, q.select.clone(), io::BufWriter::new(io::stdout()), q.limit);
     let rc = query::run_query(&data_dir, &q, &mut renderer);
     renderer.flush().ok();
     rc
@@ -387,7 +387,7 @@ fn print_search_help() {
          \x20 --help                 Show this help\n\
          \n\
          DSL grammar:\n\
-         \x20 query   := [WHERE] [expr] [GROUP BY f1,f2,...] [LIMIT n]\n\
+         \x20 query   := [SELECT f1,f2,...] [WHERE] [expr] [GROUP BY f1,f2,...] [LIMIT n]\n\
          \x20 expr    := AND / OR / NOT / ( ) over comparisons and functions\n\
          \x20 compare := field (== | = | != | <>) value\n\
          \x20 funcs   := startswith(f,'v')  endswith(f,'v')  contains(f,'v')\n\
@@ -395,6 +395,8 @@ fn print_search_help() {
          \x20 AND binds tighter than OR; use parentheses to override.\n\
          \n\
          Examples:\n\
+         \x20 siemctl search --query \"SELECT timestamp,src_ip,username WHERE src_ip == 10.0.0.5\"\n\
+         \x20 siemctl search --query \"SELECT src_ip,count GROUP BY src_ip LIMIT 20\"\n\
          \x20 siemctl search --query \"src_ip == 10.0.0.5\"\n\
          \x20 siemctl search --query \"any(username)\" --format tsv\n\
          \x20 siemctl search --query \"cidr_match(src_ip,'10.0.0.0/24')\"\n\

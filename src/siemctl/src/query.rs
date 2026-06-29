@@ -9,7 +9,7 @@
 //!
 //! Grammar (recursive descent):
 //! ```text
-//! query      := [ "WHERE" ] [ expr ] [ "GROUP" "BY" identlist ] [ "LIMIT" int ]
+//! query      := [ "SELECT" identlist ] [ "WHERE" ] [ expr ] [ "GROUP" "BY" identlist ] [ "LIMIT" int ]
 //! expr       := or_expr
 //! or_expr    := and_expr { "OR" and_expr }
 //! and_expr   := not_expr { "AND" not_expr }
@@ -21,6 +21,10 @@
 //! ```
 //! Keywords are case-insensitive; quotes (`'…'` / `"…"`) are optional everywhere
 //! and simply stripped — a slot's role (field vs. literal) is fixed by position.
+//!
+//! `SELECT` fields are output projections: they are not validated against the
+//! indexed-field set, so non-indexed JSON keys (e.g. `message`, `_raw`) are
+//! allowed. Missing fields render as `null` in JSON or empty in TSV.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -35,6 +39,8 @@ use crate::time;
 /// the `--after`/`--before` bucket-pruning bounds (set from flags after parsing).
 #[derive(Debug, PartialEq)]
 pub struct Query {
+    /// `SELECT` output projection; `None` = emit all fields.
+    pub select: Option<Vec<String>>,
     /// Parsed predicate tree; `None` matches all rows.
     pub expr: Option<Expr>,
     /// `GROUP BY` columns; `Some` switches to aggregate (COUNT per combo) mode.
@@ -69,6 +75,7 @@ pub enum Condition {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
+    Select,
     Where,
     Group,
     By,
@@ -167,6 +174,7 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
 
 fn keyword_or_word(w: String) -> Tok {
     match w.to_ascii_uppercase().as_str() {
+        "SELECT" => Tok::Select,
         "WHERE" => Tok::Where,
         "GROUP" => Tok::Group,
         "BY" => Tok::By,
@@ -199,7 +207,18 @@ impl<'a> Parser<'a> {
         t
     }
 
-    fn parse_query(&mut self) -> Result<(Option<Expr>, Option<Vec<String>>, Option<usize>), String> {
+    fn parse_query(
+        &mut self,
+    ) -> Result<(Option<Vec<String>>, Option<Expr>, Option<Vec<String>>, Option<usize>), String>
+    {
+        // Optional leading SELECT.
+        let select = if matches!(self.peek(), Some(Tok::Select)) {
+            self.next();
+            Some(self.parse_select_fields()?)
+        } else {
+            None
+        };
+
         // Optional leading WHERE.
         if matches!(self.peek(), Some(Tok::Where)) {
             self.next();
@@ -238,7 +257,34 @@ impl<'a> Parser<'a> {
                 describe(&self.peek().cloned())
             ));
         }
-        Ok((expr, group_by, limit))
+        Ok((select, expr, group_by, limit))
+    }
+
+    /// Parse a comma-separated list of output field names. Unlike
+    /// [`parse_identlist`], these are NOT validated against the indexed-field
+    /// set — any valid identifier is accepted so that non-indexed JSON keys
+    /// (e.g. `message`, `_raw`) can be projected.
+    fn parse_select_fields(&mut self) -> Result<Vec<String>, String> {
+        let mut v = vec![self.parse_output_field()?];
+        while matches!(self.peek(), Some(Tok::Comma)) {
+            self.next();
+            v.push(self.parse_output_field()?);
+        }
+        Ok(v)
+    }
+
+    fn parse_output_field(&mut self) -> Result<String, String> {
+        let name = match self.next() {
+            Some(Tok::Word(w)) => w,
+            Some(Tok::Str(s)) => s,
+            other => return Err(format!("expected a field name, found {}", describe(&other))),
+        };
+        if !crate::is_sql_ident(&name) {
+            return Err(format!(
+                "invalid field name '{name}' (only letters, digits and underscore allowed)"
+            ));
+        }
+        Ok(name)
     }
 
     fn parse_identlist(&mut self) -> Result<Vec<String>, String> {
@@ -495,8 +541,8 @@ impl Query {
     pub fn parse(dsl: &str, valid: &HashSet<String>) -> Result<Query, String> {
         let toks = lex(dsl)?;
         let mut p = Parser { toks, pos: 0, valid };
-        let (expr, group_by, limit) = p.parse_query()?;
-        Ok(Query { expr, group_by, limit, after: None, before: None })
+        let (select, expr, group_by, limit) = p.parse_query()?;
+        Ok(Query { select, expr, group_by, limit, after: None, before: None })
     }
 
     /// Compile to per-bucket `(sql, params)`. Row mode selects whole rows (the
@@ -776,6 +822,45 @@ mod tests {
         let q = parse("GROUP BY src_ip").unwrap();
         assert_eq!(q.expr, None);
         assert_eq!(q.group_by, Some(vec!["src_ip".to_string()]));
+    }
+
+    #[test]
+    fn select_fields_parsed() {
+        let q = parse("SELECT timestamp,src_ip,username WHERE src_ip == 10.0.0.1").unwrap();
+        assert_eq!(q.select, Some(vec!["timestamp".into(), "src_ip".into(), "username".into()]));
+        assert!(q.expr.is_some());
+    }
+
+    #[test]
+    fn select_standalone_match_all() {
+        let q = parse("SELECT src_ip,event_type").unwrap();
+        assert_eq!(q.select, Some(vec!["src_ip".into(), "event_type".into()]));
+        assert_eq!(q.expr, None);
+        assert_eq!(q.group_by, None);
+    }
+
+    #[test]
+    fn select_with_group_by_and_limit() {
+        let q = parse("SELECT src_ip,count GROUP BY src_ip LIMIT 10").unwrap();
+        assert_eq!(q.select, Some(vec!["src_ip".into(), "count".into()]));
+        assert_eq!(q.group_by, Some(vec!["src_ip".into()]));
+        assert_eq!(q.limit, Some(10));
+    }
+
+    #[test]
+    fn select_allows_non_indexed_fields() {
+        // Non-indexed fields (e.g. `message`) should parse without error even
+        // when a non-empty valid set is provided.
+        let mut valid = HashSet::new();
+        valid.insert("src_ip".to_string());
+        let q = Query::parse("SELECT message,src_ip", &valid).unwrap();
+        assert_eq!(q.select, Some(vec!["message".into(), "src_ip".into()]));
+    }
+
+    #[test]
+    fn select_absent_means_none() {
+        let q = parse("src_ip == 10.0.0.1").unwrap();
+        assert_eq!(q.select, None);
     }
 
     #[test]
