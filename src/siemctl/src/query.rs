@@ -26,7 +26,7 @@
 //! indexed-field set, so non-indexed JSON keys (e.g. `message`, `_raw`) are
 //! allowed. Missing fields render as `null` in JSON or empty in TSV.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::db::{self, MatchMode};
@@ -613,6 +613,28 @@ fn is_benign(msg: &str) -> bool {
     msg.contains("no such column") || msg.contains("no such table")
 }
 
+/// Extract the column name from a SQLite "no such column: X" error, if present.
+fn extract_missing_col(msg: &str) -> Option<String> {
+    let prefix = "no such column: ";
+    let pos = msg.find(prefix)?;
+    Some(msg[pos + prefix.len()..].trim().to_string())
+}
+
+fn warn_schema_skipped(count: usize, cols: &BTreeSet<String>) {
+    if cols.is_empty() {
+        eprintln!("siemctl: warning: {count} bucket(s) skipped — schema mismatch \
+                   (add fields to sources.toml and run 'reload index')");
+    } else {
+        let quoted: Vec<_> = cols.iter().map(|c| format!("'{c}'")).collect();
+        let noun = if quoted.len() == 1 { "column" } else { "columns" };
+        eprintln!(
+            "siemctl: warning: {count} bucket(s) skipped — {noun} {} not in schema \
+             (add to sources.toml and run 'reload index', or use raw_contains() for ad-hoc searches)",
+            quoted.join(", ")
+        );
+    }
+}
+
 /// Execute a parsed [`Query`] across the index and render results. Returns the
 /// process exit code (0 = hits, 1 = no matches).
 pub fn run_query<W: std::io::Write>(
@@ -638,6 +660,8 @@ fn run_rows<W: std::io::Write>(
     renderer: &mut Renderer<W>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let mut total = 0usize;
+    let mut schema_skipped = 0usize;
+    let mut missing_cols: BTreeSet<String> = BTreeSet::new();
     for db_path in dbs {
         if query.bucket_pruned(db_path) {
             continue;
@@ -653,7 +677,12 @@ fn run_rows<W: std::io::Write>(
             Ok(n) => total += n,
             Err(e) => {
                 let msg = e.to_string();
-                if !is_benign(&msg) {
+                if is_benign(&msg) {
+                    schema_skipped += 1;
+                    if let Some(col) = extract_missing_col(&msg) {
+                        missing_cols.insert(col);
+                    }
+                } else {
                     eprintln!("siemctl: {}: {e}", db_path.display());
                 }
             }
@@ -661,6 +690,9 @@ fn run_rows<W: std::io::Write>(
         if renderer.is_done() {
             break;
         }
+    }
+    if schema_skipped > 0 {
+        warn_schema_skipped(schema_skipped, &missing_cols);
     }
     if total == 0 {
         eprintln!("siemctl: no matches found");
@@ -679,6 +711,8 @@ fn run_group<W: std::io::Write>(
     renderer: &mut Renderer<W>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let mut acc: BTreeMap<Vec<String>, u64> = BTreeMap::new();
+    let mut schema_skipped = 0usize;
+    let mut missing_cols: BTreeSet<String> = BTreeSet::new();
     for db_path in dbs {
         if query.bucket_pruned(db_path) {
             continue;
@@ -692,12 +726,20 @@ fn run_group<W: std::io::Write>(
         };
         if let Err(e) = db::fold_group_sql(&conn, sql, params, fields.len(), &mut acc) {
             let msg = e.to_string();
-            if !is_benign(&msg) {
+            if is_benign(&msg) {
+                schema_skipped += 1;
+                if let Some(col) = extract_missing_col(&msg) {
+                    missing_cols.insert(col);
+                }
+            } else {
                 eprintln!("siemctl: {}: {e}", db_path.display());
             }
         }
     }
 
+    if schema_skipped > 0 {
+        warn_schema_skipped(schema_skipped, &missing_cols);
+    }
     if acc.is_empty() {
         eprintln!("siemctl: no matches found");
         return Ok(1);
@@ -1010,6 +1052,17 @@ mod tests {
         assert!(!sql.contains("topsecret"));
         assert!(params.contains(&"secret123".to_string()));
         assert!(params.contains(&"%topsecret%".to_string()));
+    }
+
+    // ── schema-skip warning ───────────────────────────────────────────────────
+
+    #[test]
+    fn extract_missing_col_parses_sqlite_error() {
+        assert_eq!(extract_missing_col("no such column: event_type"), Some("event_type".into()));
+        assert_eq!(extract_missing_col("no such column: src_ip"), Some("src_ip".into()));
+        // "no such table" has no column name to extract
+        assert_eq!(extract_missing_col("no such table: events"), None);
+        assert_eq!(extract_missing_col("some other error"), None);
     }
 
     // ── executor (end-to-end over a temp index) ──────────────────────────────
