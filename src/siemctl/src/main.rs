@@ -8,7 +8,7 @@ mod time;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -907,51 +907,85 @@ fn cmd_tail(args: &[String]) -> Result<i32> {
         return Err(format!("data directory not found: {}", data_dir.display()).into());
     }
 
-    let files = collect_raw_files(&data_dir, source.as_deref(), None, None);
-    if files.is_empty() {
-        eprintln!("siemctl: no JSONL files found");
-        return Ok(1);
-    }
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
 
     if !follow {
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
+        let files = collect_raw_files(&data_dir, source.as_deref(), None, None);
+        if files.is_empty() {
+            eprintln!("siemctl: no JSONL files found");
+            return Ok(1);
+        }
         for path in &files {
             let Ok(f) = fs::File::open(path) else { continue };
             for line in BufReader::new(f).lines().map_while(|r| r.ok()) {
-                let _ = writeln!(out, "{}", line);
+                let _ = writeln!(out, "{line}");
             }
         }
         return Ok(0);
     }
 
-    // Follow mode: invoke `tail -n 0 -F <files...>` and parse the ==> headers
-    // to prefix each line with the source filename.
-    let mut child = Command::new("tail")
-        .arg("-n").arg("0")
-        .arg("-F")
-        .args(&files)
-        .stdout(Stdio::piped())
-        .spawn()?;
+    // Follow mode: polling loop with per-file byte-offset tracking.
+    //
+    // The previous implementation spawned `tail -F` on a fixed file list captured
+    // at startup. This broke immediately because normalized writes to a new path
+    // every second (data/raw/YYYY/MM/DD/HH/MM/SS/<source>.jsonl), so the file
+    // list was stale within one second and tail kept watching empty old files.
+    //
+    // This loop re-scans for new files every 200 ms and tracks the byte offset of
+    // the last complete line read from each file. Partial lines at EOF (write in
+    // progress) are left in place and retried on the next poll.
 
-    if let Some(stdout) = child.stdout.take() {
-        let out = io::stdout();
-        let mut out = out.lock();
-        let mut cur_file = String::new();
-
-        for line in BufReader::new(stdout).lines().map_while(|r| r.ok()) {
-            if line.starts_with("==> ") && line.ends_with(" <==") {
-                cur_file = line[4..line.len() - 4].to_string();
-            } else if !line.is_empty() && !cur_file.is_empty() {
-                let _ = writeln!(out, "{}:{}", cur_file, line);
-            } else if !line.is_empty() {
-                let _ = writeln!(out, "{}", line);
-            }
-        }
+    // Seed with existing files, starting at EOF so we only show new events
+    // (matching `tail -n 0 -F` behaviour).
+    let mut tracked: HashMap<PathBuf, u64> = HashMap::new();
+    for path in collect_raw_files(&data_dir, source.as_deref(), None, None) {
+        let eof = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        tracked.insert(path, eof);
     }
 
-    child.wait()?;
-    Ok(0)
+    loop {
+        // Discover files created since the last scan; start from offset 0 for new ones.
+        for path in collect_raw_files(&data_dir, source.as_deref(), None, None) {
+            tracked.entry(path).or_insert(0);
+        }
+
+        // Emit new complete lines from every tracked file in chronological order.
+        let mut paths: Vec<PathBuf> = tracked.keys().cloned().collect();
+        paths.sort();
+
+        for path in &paths {
+            let offset = *tracked.get(path).unwrap_or(&0);
+            let Ok(mut f) = fs::File::open(path) else { continue };
+            if f.seek(SeekFrom::Start(offset)).is_err() { continue }
+
+            let mut reader = BufReader::new(&mut f);
+            let mut pos = offset;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,   // EOF — no more data right now
+                    Ok(n) => {
+                        if line.ends_with('\n') {
+                            // Complete line: emit it (strip trailing newline/CR).
+                            let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+                            let _ = writeln!(out, "{trimmed}");
+                            pos += n as u64;
+                        } else {
+                            // Partial line: writer hasn't flushed yet; retry next poll.
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = out.flush();
+            tracked.insert(path.clone(), pos);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 // ── cmd: retention ─────────────────────────────────────────────────────────
