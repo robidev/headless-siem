@@ -399,8 +399,8 @@ fn print_search_help() {
          \x20 siemctl search --query \"any(username)\" --format tsv\n\
          \x20 siemctl search --query \"cidr_match(src_ip,'10.0.0.0/24')\"\n\
          \x20 siemctl search --query \"startswith(event_type,'ssh')\"\n\
-         \x20 siemctl search --query \"source == sshd AND raw_contains('Failed password')\"\n\
-         \x20 siemctl search --query \"source == sshd GROUP BY src_ip\"\n\
+         \x20 siemctl search --query \"_source_type == sshd AND raw_contains('Failed password')\"\n\
+         \x20 siemctl search --query \"_source_type == sshd GROUP BY src_ip\"\n\
          \x20 siemctl search --query \"GROUP BY src_ip,dst_ip\" --after 2026-06-22T08\n\
          \x20 siemctl search --raw 'Failed password' --after 2026-06-22T08\n\
          \x20 siemctl search --after 2026-06-22T08 --before 2026-06-22T10"

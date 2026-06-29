@@ -136,7 +136,7 @@ target/debug/siemctl search --data-dir data/ \
 
 # Search by time range
 target/debug/siemctl search --data-dir data/ \
-  --query "source == sshd" --after "2026-06-22T08" --before "2026-06-22T09"
+  --query "_source_type == sshd" --after "2026-06-22T08" --before "2026-06-22T09"
 
 # Stream live events
 target/debug/siemctl tail --data-dir data/
@@ -340,7 +340,7 @@ siemctl search --data-dir data/ --query "cidr_match(src_ip,'10.0.0.0/24')"
 
 # Combine conditions and prune by time range
 siemctl search --data-dir data/ \
-  --query "src_ip == 10.0.0.5 AND source == sshd" \
+  --query "src_ip == 10.0.0.5 AND _source_type == sshd" \
   --after "2026-06-22T08" --before "2026-06-22T12"
 ```
 
@@ -353,7 +353,7 @@ siemctl search --data-dir data/ --query "raw_contains('Failed password')"
 # Field filter + text — the field index narrows rows first, then the substring
 # test runs only on survivors
 siemctl search --data-dir data/ \
-  --query "source == sshd AND raw_contains('root')"
+  --query "_source_type == sshd AND raw_contains('root')"
 ```
 
 **3. Grouping (filter then group) and limits:**
@@ -363,7 +363,7 @@ siemctl search --data-dir data/ \
 siemctl search --data-dir data/ --query "GROUP BY src_ip"
 
 # Filter, then group — a single composed query
-siemctl search --data-dir data/ --query "source == sshd GROUP BY src_ip,event_type"
+siemctl search --data-dir data/ --query "_source_type == sshd GROUP BY src_ip,event_type"
 
 # Cap the rows emitted
 siemctl search --data-dir data/ --query "GROUP BY src_ip LIMIT 10"

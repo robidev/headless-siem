@@ -10,7 +10,10 @@ use crate::db::IndexDb;
 ///
 /// Only fields that appear in `index_fields` are extracted.
 /// `timestamp` is required — if missing, returns `None`.
-/// `_source_type` is mapped to the `source` field.
+/// `_source_type` (the source label) is stored under its own name, defaulting
+/// to `"unknown"` when absent — the index column matches the JSONL key, with no
+/// renaming, so the same name is used by normalized, the Sigma rules, the index,
+/// and siemctl.
 /// `byte_offset` is the real byte offset of this line's start in the file.
 /// `raw_file` is the path relative to data_dir stored as-is.
 ///
@@ -57,17 +60,18 @@ pub fn parse_line(
     fields.insert("byte_offset".to_string(), byte_offset.to_string());
     fields.insert("raw_file".to_string(), raw_file.to_string());
 
-    // Map _source_type → source
-    let source = obj
+    // Source label: stored under its own name (no remap), defaulting to
+    // "unknown" when the payload omits it.
+    let source_type = obj
         .get("_source_type")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
-    fields.insert("source".to_string(), source.to_string());
+    fields.insert("_source_type".to_string(), source_type.to_string());
 
     // Extract all other fields that are in index_fields
     for field_name in index_fields {
         // Skip mandatory fields already handled above
-        if matches!(field_name.as_str(), "timestamp" | "source" | "byte_offset" | "raw_file") {
+        if matches!(field_name.as_str(), "timestamp" | "_source_type" | "byte_offset" | "raw_file") {
             continue;
         }
 
@@ -219,7 +223,7 @@ mod tests {
     fn default_fields() -> Vec<String> {
         vec![
             "timestamp".to_string(),
-            "source".to_string(),
+            "_source_type".to_string(),
             "src_ip".to_string(),
             "dst_ip".to_string(),
             "event_type".to_string(),
@@ -235,7 +239,7 @@ mod tests {
         let line = r#"{"timestamp":"Jun 22 08:55:03","src_ip":"10.0.0.5","_source_type":"sshd","_normalized":true}"#;
         let event = parse_line(line, 0, "raw/2026/06/22/08/55/03/sshd.jsonl", &fields).unwrap();
         assert_eq!(event.get("timestamp").unwrap(), "Jun 22 08:55:03");
-        assert_eq!(event.get("source").unwrap(), "sshd");
+        assert_eq!(event.get("_source_type").unwrap(), "sshd");
         assert_eq!(event.get("src_ip").unwrap(), "10.0.0.5");
         assert_eq!(event.get("byte_offset").unwrap(), "0");
         assert_eq!(event.get("raw_file").unwrap(), "raw/2026/06/22/08/55/03/sshd.jsonl");
@@ -262,7 +266,7 @@ mod tests {
         let fields = default_fields();
         let line = r#"{"timestamp":"Jun 22 08:55:03","src_ip":"10.0.0.5"}"#;
         let event = parse_line(line, 0, "raw/test.jsonl", &fields).unwrap();
-        assert_eq!(event.get("source").unwrap(), "unknown");
+        assert_eq!(event.get("_source_type").unwrap(), "unknown");
     }
 
     #[test]
@@ -271,7 +275,7 @@ mod tests {
         let line = r#"{"timestamp":"Jun 22 08:55:03","src_ip":"10.0.0.5","dst_ip":"192.168.1.1","event_type":"SSH_FAILED","severity":"WARN","_source_type":"sshd"}"#;
         let event = parse_line(line, 0, "raw/test.jsonl", &fields).unwrap();
         assert_eq!(event.get("timestamp").unwrap(), "Jun 22 08:55:03");
-        assert_eq!(event.get("source").unwrap(), "sshd");
+        assert_eq!(event.get("_source_type").unwrap(), "sshd");
         assert_eq!(event.get("src_ip").unwrap(), "10.0.0.5");
         assert_eq!(event.get("dst_ip").unwrap(), "192.168.1.1");
         assert_eq!(event.get("event_type").unwrap(), "SSH_FAILED");
@@ -292,7 +296,7 @@ mod tests {
         // Simulate config with username and dst_port
         let fields = vec![
             "timestamp".to_string(),
-            "source".to_string(),
+            "_source_type".to_string(),
             "src_ip".to_string(),
             "dst_ip".to_string(),
             "dst_port".to_string(),

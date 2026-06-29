@@ -259,7 +259,7 @@ SEARCH_QUERY_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "raw_contain
 check "siemctl search raw_contains returns results" test -n "$SEARCH_QUERY_OUT"
 
 # Composed: source predicate + time-range bucket pruning
-SEARCH_SOURCE_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "source == sshd" --after "2026-06-22T08" --before "2026-06-22T09" 2>&1) || true
+SEARCH_SOURCE_OUT=$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "_source_type == sshd" --after "2026-06-22T08" --before "2026-06-22T09" 2>&1) || true
 check "siemctl search source predicate with time range returns results" test -n "$SEARCH_SOURCE_OUT"
 
 # --raw escape hatch: literal substring scan straight over raw files

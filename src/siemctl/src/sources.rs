@@ -52,12 +52,14 @@ pub fn load_index_fields(path: &Path) -> HashSet<String> {
     fields
 }
 
-/// Fields that are always present in every index bucket regardless of
+/// Fields that `indexd` creates as a column in *every* bucket regardless of
 /// `sources.toml`, so they are always searchable and never count as
-/// "unindexed" in the validate cross-check.
+/// "unindexed" in the validate cross-check. These mirror the mandatory set in
+/// `indexd`'s `config.rs::all_index_fields` (minus the internal `byte_offset`/
+/// `raw_file` pointers). All other fields (`src_ip`, `event_type`, `username`,
+/// …) are only present when a source declares them in `index_fields`.
 pub fn always_valid() -> HashSet<String> {
-    ["timestamp", "source", "src_ip", "dst_ip", "src_port", "dst_port",
-     "event_type", "username", "severity"]
+    ["timestamp", "_source_type", "severity"]
         .iter()
         .map(|s| s.to_string())
         .collect()

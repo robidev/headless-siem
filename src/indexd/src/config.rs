@@ -57,9 +57,13 @@ impl Config {
     pub fn all_index_fields(&self) -> Vec<String> {
         let mut fields: BTreeSet<String> = BTreeSet::new();
 
-        // Mandatory fields — always present in every event
+        // Mandatory fields — always present in every event. `_source_type`
+        // (the derived source label) and `severity` come straight from the
+        // normalized payload under those names; `byte_offset`/`raw_file` are the
+        // pointer back to the original raw line.
         fields.insert("timestamp".to_string());
-        fields.insert("source".to_string());
+        fields.insert("_source_type".to_string());
+        fields.insert("severity".to_string());
         fields.insert("byte_offset".to_string());
         fields.insert("raw_file".to_string());
 
@@ -129,7 +133,8 @@ index_fields = ["src_ip", "dst_ip", "event_type"]
 
         // Mandatory fields always present
         assert!(fields.contains(&"timestamp".to_string()));
-        assert!(fields.contains(&"source".to_string()));
+        assert!(fields.contains(&"_source_type".to_string()));
+        assert!(fields.contains(&"severity".to_string()));
         assert!(fields.contains(&"byte_offset".to_string()));
 
         // Union of all index_fields
@@ -172,11 +177,10 @@ index_fields = ["field_m"]
         assert_eq!(fields1, fields2);
 
         // Verify sorted order
+        let mandatory = ["timestamp", "_source_type", "severity", "byte_offset", "raw_file"];
         let dynamic: Vec<&str> = fields1
             .iter()
-            .filter(|f| {
-                *f != "timestamp" && *f != "source" && *f != "byte_offset"
-            })
+            .filter(|f| !mandatory.contains(&f.as_str()))
             .map(|s| s.as_str())
             .collect();
         assert!(dynamic.windows(2).all(|w| w[0] < w[1]), "fields should be sorted");

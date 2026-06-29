@@ -5,6 +5,12 @@
 #
 # Source labels come from the normalized binary (app_name, _source_type,
 # override rules, etc.) — not from this file.
+#
+# Mandatory fields are always indexed in every bucket regardless of the lists
+# below: `timestamp`, `_source_type` (the source label, stored under the same
+# name normalized/ruled use — no renaming), `severity`, plus the internal
+# `byte_offset`/`raw_file` pointers. So `siemctl search` can always filter on
+# `_source_type`, `severity`, and `timestamp`.
 
 [source.sshd]
 index_fields = ["src_ip", "event_type", "username"]

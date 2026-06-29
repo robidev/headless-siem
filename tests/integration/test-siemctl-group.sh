@@ -85,14 +85,14 @@ find "$TEST_DIR/index" -name '*.db' -printf '      %f\n' | sort
 echo ""
 
 # ── 1. Single-field grouping, counts merged across buckets ────────────────
-echo "[1] GROUP BY source  (sshd spans 2 buckets → must report 10)"
-demo_contains "sshd count merged across buckets = 10" '{"source":"sshd","count":10}' \
-    "$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source"
+echo "[1] GROUP BY _source_type  (sshd spans 2 buckets → must report 10)"
+demo_contains "sshd count merged across buckets = 10" '{"_source_type":"sshd","count":10}' \
+    "$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY _source_type"
 echo ""
 
 echo "[2] other source counts are present"
-GROUP_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source" 2>&1)" || true
-for kv in '"source":"iptables","count":6' '"source":"systemd","count":5' '"source":"sudo","count":4'; do
+GROUP_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY _source_type" 2>&1)" || true
+for kv in '"_source_type":"iptables","count":6' '"_source_type":"systemd","count":5' '"_source_type":"sudo","count":4'; do
     grep -qF -- "$kv" <<< "$GROUP_OUT" && pass "contains $kv" || fail "count" "missing $kv"
 done
 echo ""
@@ -101,20 +101,20 @@ echo ""
 echo "[3] output is sorted by count descending"
 FIRST_LINE="$(head -1 <<< "$GROUP_OUT")"
 echo "      first line: $FIRST_LINE"
-[ "$FIRST_LINE" = '{"source":"sshd","count":10}' ] \
+[ "$FIRST_LINE" = '{"_source_type":"sshd","count":10}' ] \
     && pass "highest count (sshd=10) sorts first" \
     || fail "sort" "first line was: $FIRST_LINE"
 echo ""
 
 # ── 4. TSV format: header + a count column ────────────────────────────────
-echo '[4] GROUP BY source --format tsv'
-demo_contains "tsv header is 'source<TAB>count'" "$(printf 'source\tcount')" \
-    "$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source" --format tsv
+echo '[4] GROUP BY _source_type --format tsv'
+demo_contains "tsv header is '_source_type<TAB>count'" "$(printf '_source_type\tcount')" \
+    "$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY _source_type" --format tsv
 echo ""
 
 # ── 5. LIMIT caps the number of group rows emitted ────────────────────────
-echo '[5] GROUP BY source LIMIT 2  (top 2 only)'
-LIMIT_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source LIMIT 2" 2>&1)" || true
+echo '[5] GROUP BY _source_type LIMIT 2  (top 2 only)'
+LIMIT_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY _source_type LIMIT 2" 2>&1)" || true
 echo "$LIMIT_OUT" | sed 's/^/      /'
 LIMIT_LINES=$(grep -c '"count"' <<< "$LIMIT_OUT")
 [ "$LIMIT_LINES" -eq 2 ] && pass "LIMIT 2 emits exactly 2 rows" \
@@ -122,19 +122,19 @@ LIMIT_LINES=$(grep -c '"count"' <<< "$LIMIT_OUT")
 echo ""
 
 # ── 6. Filter then group (new capability: predicate + GROUP BY) ───────────
-echo '[6] source == sshd GROUP BY source  (filter then group)'
-FILTERED_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "source == sshd GROUP BY source" 2>&1)" || true
+echo '[6] _source_type == sshd GROUP BY _source_type  (filter then group)'
+FILTERED_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "_source_type == sshd GROUP BY _source_type" 2>&1)" || true
 echo "$FILTERED_OUT" | sed 's/^/      /'
 # Only the sshd combo survives the predicate, still counting 10 across buckets.
 { [ "$(grep -c '"count"' <<< "$FILTERED_OUT")" -eq 1 ] \
-    && grep -qF -- '{"source":"sshd","count":10}' <<< "$FILTERED_OUT"; } \
+    && grep -qF -- '{"_source_type":"sshd","count":10}' <<< "$FILTERED_OUT"; } \
     && pass "predicate restricts grouping to sshd=10 only" \
     || fail "filter-then-group" "unexpected output: $FILTERED_OUT"
 echo ""
 
 # ── 7. Two-field grouping works; total across combos = 25 events ──────────
-echo '[7] GROUP BY source, event_type  (multi-field SQL + merge)'
-TWO_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY source, event_type" 2>&1)" || true
+echo '[7] GROUP BY _source_type, event_type  (multi-field SQL + merge)'
+TWO_OUT="$("$SIEMCTL" search --data-dir "$TEST_DIR" --query "GROUP BY _source_type, event_type" 2>&1)" || true
 echo "$TWO_OUT" | sed 's/^/      /'
 TWO_TOTAL=$(grep -oE '"count":[0-9]+' <<< "$TWO_OUT" | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')
 [ "${TWO_TOTAL:-0}" -eq 25 ] && pass "combo counts sum to all 25 indexed events" \
