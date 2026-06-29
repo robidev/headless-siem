@@ -6,11 +6,33 @@
 # Source labels come from the normalized binary (app_name, _source_type,
 # override rules, etc.) — not from this file.
 #
-# Mandatory fields are always indexed in every bucket regardless of the lists
-# below: `timestamp`, `_source_type` (the source label, stored under the same
-# name normalized/ruled use — no renaming), `severity`, plus the internal
-# `byte_offset`/`raw_file` pointers. So `siemctl search` can always filter on
-# `_source_type`, `severity`, and `timestamp`.
+# ── Always-indexed fields ─────────────────────────────────────────────────────
+#
+# These are present in every bucket without any entry here.
+#
+# Syslog envelope fields — from the transport layer, available on every event:
+#   source_addr   Sender IP address (UDP source), or "stdin" for piped input.
+#                 Use to identify which host sent the log when multiple sources
+#                 forward to the same collector.
+#   hostname      Hostname from the syslog header.
+#   app_name      Process name from the syslog header, BEFORE any override rule
+#                 rewrites _source_type. E.g. when kernel logs are relabelled to
+#                 "iptables", app_name is still "kernel". Useful for catching
+#                 sources that haven't been assigned a specific source label yet.
+#
+# Core normalization fields — produced by the pipeline for every event:
+#   timestamp     Event timestamp (falls back to receive time if not in the log).
+#   _source_type  Derived source label (app_name + override rules).
+#   severity      Syslog severity level.
+#
+# Internal index pointers (not user-searchable):
+#   byte_offset, raw_file   Back-reference to the raw JSONL line for --full/-F
+#                           lookups and raw_contains() UDF.
+#
+# ── Per-source fields ─────────────────────────────────────────────────────────
+#
+# Declare application-specific fields below. Only list fields not already in
+# the always-indexed set above.
 
 [source.sshd]
 index_fields = ["src_ip", "event_type", "username"]

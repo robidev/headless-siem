@@ -57,13 +57,25 @@ impl Config {
     pub fn all_index_fields(&self) -> Vec<String> {
         let mut fields: BTreeSet<String> = BTreeSet::new();
 
-        // Mandatory fields — always present in every event. `_source_type`
-        // (the derived source label) and `severity` come straight from the
-        // normalized payload under those names; `byte_offset`/`raw_file` are the
-        // pointer back to the original raw line.
+        // Mandatory fields — always present in every event.
+        //
+        // Envelope fields (syslog framing, available regardless of app or format):
+        //   _source_type  — derived source label (app_name + override rules)
+        //   severity      — syslog severity
+        //   timestamp     — event timestamp
+        //   source_addr   — IP address of the sending host (or "stdin")
+        //   hostname      — syslog hostname header
+        //   app_name      — syslog process name (pre-override; useful when
+        //                   _source_type has been relabelled by an override rule)
+        //
+        // Internal pointers (back-reference to the raw JSONL line):
+        //   byte_offset / raw_file
         fields.insert("timestamp".to_string());
         fields.insert("_source_type".to_string());
         fields.insert("severity".to_string());
+        fields.insert("source_addr".to_string());
+        fields.insert("hostname".to_string());
+        fields.insert("app_name".to_string());
         fields.insert("byte_offset".to_string());
         fields.insert("raw_file".to_string());
 
@@ -135,6 +147,9 @@ index_fields = ["src_ip", "dst_ip", "event_type"]
         assert!(fields.contains(&"timestamp".to_string()));
         assert!(fields.contains(&"_source_type".to_string()));
         assert!(fields.contains(&"severity".to_string()));
+        assert!(fields.contains(&"source_addr".to_string()));
+        assert!(fields.contains(&"hostname".to_string()));
+        assert!(fields.contains(&"app_name".to_string()));
         assert!(fields.contains(&"byte_offset".to_string()));
 
         // Union of all index_fields
@@ -177,7 +192,8 @@ index_fields = ["field_m"]
         assert_eq!(fields1, fields2);
 
         // Verify sorted order
-        let mandatory = ["timestamp", "_source_type", "severity", "byte_offset", "raw_file"];
+        let mandatory = ["timestamp", "_source_type", "severity", "source_addr", "hostname",
+                         "app_name", "byte_offset", "raw_file"];
         let dynamic: Vec<&str> = fields1
             .iter()
             .filter(|f| !mandatory.contains(&f.as_str()))

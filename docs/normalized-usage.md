@@ -132,16 +132,39 @@ Always-present keys:
 |-----|---------|
 | `timestamp` | The event's own timestamp, **falling back to receive time** if the line carries none (so `indexd`, which requires it, never drops a line). |
 | `_received` | Wall-clock time the line was ingested (RFC 3339). |
-| `_source_type` | Derived source label (see [Source derivation](#source-derivation)); `indexd` maps this to its `source` column. |
+| `_source_type` | Derived source label (see [Source derivation](#source-derivation)). |
 | `_format` | Which parser claimed the line (`rfc5424`, `json`, `cef`, `plain`, …). |
 | `_normalized` | `true` for any structured parse; `false` only for the plain-text fallback. |
 | `source_addr` | Sender IP, or `"stdin"`. |
 | `_raw` | The original (inner) log line, verbatim — nothing is ever lost. |
 
-Conditional keys, present when the parser extracted them: `hostname`,
-`app_name`, `proc_id`, `msg_id`, `severity`, `facility`, `message`, plus every
-structured field lifted to the top level (JSON keys, CEF/LEEF extensions,
-logfmt pairs, CSV columns, XML/YAML nodes).
+### Syslog envelope fields
+
+`source_addr`, `hostname`, and `app_name` come from the syslog transport layer
+and are available on **every** event regardless of app or format. They are
+**automatically indexed** in every `indexd` bucket — no `sources.toml` entry
+needed.
+
+| Field | Source | Notes |
+|-------|--------|-------|
+| `source_addr` | UDP source IP of the sending host | `"stdin"` when reading from a pipe or file. Use `source_addr == "10.0.0.5"` to find all logs from a specific forwarder. |
+| `hostname` | Syslog header `HOSTNAME` field | The name the remote host put in its syslog header, which may differ from the IP in `source_addr` if NAT or a relay is involved. |
+| `app_name` | Syslog header `APP-NAME` / tag field | The raw process name **before** any override rule rewrites `_source_type`. E.g. when kernel logs are relabelled to `iptables` by an override rule, `app_name` is still `kernel`. Useful for writing override rules and for querying sources that haven't been labelled yet. |
+
+The following envelope fields are present **when the syslog header carries
+them**, but are not automatically indexed (they're noisier and rarely useful
+as search filters):
+
+| Field | Meaning |
+|-------|---------|
+| `proc_id` | PID from the syslog header (changes each run). |
+| `msg_id` | RFC 5424 MSGID (rarely populated in practice). |
+| `facility` | Syslog facility number. |
+| `message` | The human-readable message body (after structured parsing; the full payload for plain-text). |
+
+Conditional structured-format keys: every field lifted to the top level by
+JSON, CEF/LEEF, logfmt, CSV, or XML/YAML parsers, plus every named capture
+from `[[extract.rule]]` patterns.
 
 **Field canonicalization.** Common SIEM synonyms are renamed to canonical keys
 so detection rules can rely on them: `src`→`src_ip`, `dst`→`dst_ip`,

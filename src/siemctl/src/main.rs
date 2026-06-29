@@ -313,19 +313,29 @@ fn print_verbose_status(data_dir: &Path) {
     if per_source.is_empty() {
         println!("  (sources.toml not found or empty)");
     } else {
-        let mandatory: Vec<String> = {
-            let mut v: Vec<_> = sources::always_valid().into_iter().collect();
+        println!("  Envelope (all sources — from the syslog transport layer):");
+        println!("    source_addr  — sender IP (UDP source address, or \"stdin\")");
+        println!("    hostname     — syslog header hostname");
+        println!("    app_name     — syslog process name before override rules rewrite _source_type");
+
+        // Core derived fields
+        let core: Vec<String> = {
+            let mut v = sources::core_fields();
             v.sort();
             v
         };
-        println!("  Mandatory (all sources): {}", mandatory.join(", "));
         println!();
+        println!("  Core (all sources, normalization pipeline):");
+        println!("    {}", core.join(", "));
+
+        println!();
+        println!("  Per-source indexed fields (from sources.toml):");
         for (src, fields) in &per_source {
             if fields.is_empty() {
                 println!("  {src:<20} (no indexed fields)");
             } else {
                 let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-                let prefix = format!("  {src:<20} ");
+                let prefix = format!("    {src:<20} ");
                 let indent = prefix.len();
                 println!("{}{}", prefix, wrap_field_list(&refs, indent, 76)[indent..].trim_start());
             }

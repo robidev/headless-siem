@@ -54,15 +54,48 @@ pub fn load_index_fields(path: &Path) -> HashSet<String> {
 
 /// Fields that `indexd` creates as a column in *every* bucket regardless of
 /// `sources.toml`, so they are always searchable and never count as
-/// "unindexed" in the validate cross-check. These mirror the mandatory set in
-/// `indexd`'s `config.rs::all_index_fields` (minus the internal `byte_offset`/
-/// `raw_file` pointers). All other fields (`src_ip`, `event_type`, `username`,
-/// …) are only present when a source declares them in `index_fields`.
+/// "unindexed" in the validate cross-check.
+///
+/// Split into two groups that mirror `indexd`'s `all_index_fields()`:
+///   - Syslog envelope fields: always present from the transport layer.
+///   - Core derived fields: always present from the normalization pipeline.
+///   - Internal pointers (`byte_offset`/`raw_file`) are excluded — they are
+///     indexed but not user-visible search fields.
 pub fn always_valid() -> HashSet<String> {
-    ["timestamp", "_source_type", "severity"]
-        .iter()
-        .map(|s| s.to_string())
+    envelope_fields()
+        .into_iter()
+        .chain(core_fields())
         .collect()
+}
+
+/// Syslog envelope fields — present on every event from the transport layer,
+/// regardless of app or log format. These are indexed in every bucket by
+/// `indexd` without any `sources.toml` declaration.
+///
+/// | Field        | Source                                              |
+/// |--------------|-----------------------------------------------------|
+/// | source_addr  | IP of the sending host (UDP src), or "stdin"        |
+/// | hostname     | Hostname from the syslog header                     |
+/// | app_name     | Process name from the syslog header (pre-override)  |
+///
+/// `app_name` is the raw process name before override rules rewrite
+/// `_source_type`. Querying `app_name == "kernel"` finds those events even
+/// when the source label has been changed to "iptables" by an override rule.
+pub fn envelope_fields() -> Vec<String> {
+    vec![
+        "source_addr".to_string(),
+        "hostname".to_string(),
+        "app_name".to_string(),
+    ]
+}
+
+/// Core derived fields — always produced by the normalization pipeline.
+pub fn core_fields() -> Vec<String> {
+    vec![
+        "timestamp".to_string(),
+        "_source_type".to_string(),
+        "severity".to_string(),
+    ]
 }
 
 /// Parse `sources.toml` and return the `index_fields` list for each `[source.X]`
