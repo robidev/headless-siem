@@ -585,7 +585,7 @@ impl Query {
 // ── Executor ─────────────────────────────────────────────────────────────────
 
 /// Collect, sorted, the `.db` bucket files under `data_dir/index/`.
-fn index_buckets(data_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+pub(crate) fn index_buckets(data_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let idx_dir = data_dir.join("index");
     if !idx_dir.is_dir() {
         return Err("no index directory found — run 'indexd' to build the index first, \

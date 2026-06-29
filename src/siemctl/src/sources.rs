@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -63,6 +63,58 @@ pub fn always_valid() -> HashSet<String> {
         .iter()
         .map(|s| s.to_string())
         .collect()
+}
+
+/// Parse `sources.toml` and return the `index_fields` list for each `[source.X]`
+/// entry, preserving declaration order within each source. Sorted by source name.
+pub fn load_per_source_fields(path: &Path) -> BTreeMap<String, Vec<String>> {
+    let mut result: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return result;
+    };
+    let mut current: Option<String> = None;
+    let mut in_array = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with('#') || t.is_empty() {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("[source.") {
+            if let Some(name) = rest.strip_suffix(']') {
+                current = Some(name.to_string());
+            }
+            in_array = false;
+            continue;
+        }
+        if t.starts_with('[') {
+            current = None;
+            in_array = false;
+            continue;
+        }
+        let Some(ref src) = current else { continue };
+        if t.starts_with("index_fields") && t.contains('=') {
+            in_array = true;
+        }
+        if in_array {
+            let mut rest = t;
+            while let Some(i) = rest.find('"') {
+                rest = &rest[i + 1..];
+                if let Some(j) = rest.find('"') {
+                    let f = &rest[..j];
+                    if !f.is_empty() {
+                        result.entry(src.clone()).or_default().push(f.to_string());
+                    }
+                    rest = &rest[j + 1..];
+                } else {
+                    break;
+                }
+            }
+            if t.contains(']') {
+                in_array = false;
+            }
+        }
+    }
+    result
 }
 
 /// Locate `config/sources.toml` relative to cwd or the running binary.

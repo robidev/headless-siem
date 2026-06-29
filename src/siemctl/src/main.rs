@@ -6,7 +6,7 @@ mod sources;
 mod time;
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -33,6 +33,7 @@ fn main() {
 
     let rc = match cmd.as_str() {
         "status" => run(cmd_status(rest)),
+        "stats" => run(cmd_stats(rest)),
         "search" => run(cmd_search(rest, &valid_fields)),
         "tail" => run(cmd_tail(rest)),
         "retention" => run(cmd_retention(rest)),
@@ -65,6 +66,7 @@ fn print_top_help() {
          \n\
          COMMANDS:\n\
          \x20 status      Show data directory size, file counts, index coverage\n\
+         \x20 stats       Event counts per source, field coverage (use --source for breakdown)\n\
          \x20 search      Search indexed buckets or raw JSONL (field, full-text, time-range)\n\
          \x20 tail        Stream live events from raw JSONL files\n\
          \x20 retention   Delete raw data older than N days\n\
@@ -182,15 +184,21 @@ fn stem_matches(path: &Path, source: Option<&str>) -> bool {
 
 fn cmd_status(args: &[String]) -> Result<i32> {
     let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut verbose = false;
 
     let mut it = args.iter().map(String::as_str);
     while let Some(arg) = it.next() {
         match arg {
             "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
+            "--verbose" | "-v" => verbose = true,
             "--help" | "-h" => {
                 println!(
-                    "Usage: siemctl status [--data-dir DIR]\n\n\
-                     Show SIEM data directory size, source file counts, and index coverage."
+                    "Usage: siemctl status [--verbose] [--data-dir DIR]\n\n\
+                     Show SIEM data directory size, source file counts, and index coverage.\n\n\
+                     Options:\n\
+                     \x20 --verbose    Also show sources.toml, normalized.toml field inventory,\n\
+                     \x20              and the actual column set of the latest index bucket.\n\
+                     \x20 --data-dir   Data directory (default: ./data)"
                 );
                 return Ok(0);
             }
@@ -266,7 +274,140 @@ fn cmd_status(args: &[String]) -> Result<i32> {
         println!("  Index: (no index/ directory)");
     }
 
+    if verbose {
+        print_verbose_status(&data_dir);
+    }
+
     Ok(0)
+}
+
+// ── cmd: status --verbose helpers ──────────────────────────────────────────
+
+fn wrap_field_list(fields: &[&str], indent: usize, width: usize) -> String {
+    let pad = " ".repeat(indent);
+    let mut out = pad.clone();
+    let mut line_len = indent;
+    for (i, f) in fields.iter().enumerate() {
+        let sep = if i + 1 < fields.len() { ", " } else { "" };
+        let chunk = format!("{f}{sep}");
+        if line_len + chunk.len() > width && line_len > indent {
+            out.push('\n');
+            out.push_str(&pad);
+            line_len = indent;
+        }
+        out.push_str(&chunk);
+        line_len += chunk.len();
+    }
+    out
+}
+
+fn print_verbose_status(data_dir: &Path) {
+    // ── sources.toml section ──────────────────────────────────────────────
+    let sources_path = sources::find_sources_toml();
+    let per_source = sources_path
+        .as_ref()
+        .map(|p| sources::load_per_source_fields(p))
+        .unwrap_or_default();
+
+    println!("\n── sources.toml — indexed fields {}", "─".repeat(17));
+    if per_source.is_empty() {
+        println!("  (sources.toml not found or empty)");
+    } else {
+        let mandatory: Vec<String> = {
+            let mut v: Vec<_> = sources::always_valid().into_iter().collect();
+            v.sort();
+            v
+        };
+        println!("  Mandatory (all sources): {}", mandatory.join(", "));
+        println!();
+        for (src, fields) in &per_source {
+            if fields.is_empty() {
+                println!("  {src:<20} (no indexed fields)");
+            } else {
+                let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+                let prefix = format!("  {src:<20} ");
+                let indent = prefix.len();
+                println!("{}{}", prefix, wrap_field_list(&refs, indent, 76)[indent..].trim_start());
+            }
+        }
+    }
+
+    // ── normalized.toml section ───────────────────────────────────────────
+    let norm_path = normconfig::find_normalized_toml();
+    let norm_per = norm_path
+        .as_ref()
+        .map(|p| normconfig::load_per_source(p))
+        .unwrap_or_default();
+
+    if !norm_per.is_empty() {
+        println!("\n── normalized.toml — fields by app_name {}", "─".repeat(10));
+        println!(
+            "  (override rules may relabel app_name to a different source in sources.toml)\n"
+        );
+
+        // Build full set of indexed fields for cross-reference.
+        let all_indexed: HashSet<String> = {
+            let mut s = sources::always_valid();
+            for fields in per_source.values() {
+                s.extend(fields.iter().cloned());
+            }
+            s
+        };
+
+        for (app, fields) in &norm_per {
+            let flist: Vec<&str> = fields.iter().map(String::as_str).collect();
+            let prefix = format!("  {app:<20} ");
+            let indent = prefix.len();
+            println!("{}{}", prefix, wrap_field_list(&flist, indent, 76)[indent..].trim_start());
+
+            let not_indexed: Vec<&str> = flist
+                .iter()
+                .copied()
+                .filter(|f| !all_indexed.contains(*f))
+                .collect();
+            if !not_indexed.is_empty() {
+                let arrow = " ".repeat(indent - 4);
+                println!(
+                    "{arrow}  → not indexed: {}",
+                    wrap_field_list(&not_indexed, indent + 2, 76)
+                        .trim_start()
+                        .to_string()
+                );
+            }
+        }
+    } else if norm_path.is_some() {
+        println!("\n── normalized.toml — fields by app_name {}", "─".repeat(10));
+        println!("  (no extract rules with app_name found)");
+    }
+
+    // ── Index schema — latest bucket ──────────────────────────────────────
+    let idx_dir = data_dir.join("index");
+    if idx_dir.is_dir() {
+        let mut db_files: Vec<PathBuf> = fs::read_dir(&idx_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().map(|x| x == "db").unwrap_or(false))
+            .map(|e| e.path())
+            .collect();
+        db_files.sort();
+
+        if let Some(latest) = db_files.last() {
+            let name = latest.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            println!("\n── Index schema (latest bucket) {}", "─".repeat(19));
+            match db::open_bucket_conn(latest, data_dir) {
+                Ok(conn) => {
+                    let cols = db::bucket_columns(&conn);
+                    let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+                    println!("  {name}  — {} columns:", cols.len());
+                    println!("{}", wrap_field_list(&refs, 4, 76));
+                }
+                Err(e) => {
+                    println!("  {name}  — (could not open: {e})");
+                }
+            }
+        }
+    }
 }
 
 fn count_dir_size(dir: &Path, total: &mut u64) {
@@ -279,6 +420,204 @@ fn count_dir_size(dir: &Path, total: &mut u64) {
             *total += m.len();
         }
     }
+}
+
+// ── cmd: stats ─────────────────────────────────────────────────────────────
+
+fn cmd_stats(args: &[String]) -> Result<i32> {
+    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut source: Option<String> = None;
+    let mut after: Option<time::HourBucket> = None;
+    let mut before: Option<time::HourBucket> = None;
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
+            "--source" | "-s" => source = Some(next_arg(&mut it, arg)?.to_string()),
+            "--after" | "-a" => {
+                let s = next_arg(&mut it, arg)?;
+                after = Some(
+                    time::HourBucket::parse(s)
+                        .ok_or_else(|| format!("invalid --after '{s}' (YYYY-MM-DDTHH)"))?,
+                );
+            }
+            "--before" | "-b" => {
+                let s = next_arg(&mut it, arg)?;
+                before = Some(
+                    time::HourBucket::parse(s)
+                        .ok_or_else(|| format!("invalid --before '{s}' (YYYY-MM-DDTHH)"))?,
+                );
+            }
+            "--help" | "-h" => {
+                println!(
+                    "Usage: siemctl stats [--source SRC] [--after YYYY-MM-DDTHH] \
+                     [--before YYYY-MM-DDTHH] [--data-dir DIR]\n\n\
+                     Show event counts and field coverage from the index.\n\n\
+                     Without --source: event counts per source, then overall field coverage.\n\
+                     With --source SRC: event type breakdown for that source, then per-field\n\
+                     coverage scoped to that source.\n\n\
+                     Options:\n\
+                     \x20 --source SRC       Restrict to one source label\n\
+                     \x20 --after  YYYY-MM-DDTHH  Start of time range\n\
+                     \x20 --before YYYY-MM-DDTHH  End of time range\n\
+                     \x20 --data-dir DIR     Data directory (default: ./data)"
+                );
+                return Ok(0);
+            }
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    // Load indexed fields for field coverage query.
+    let sources_path = sources::find_sources_toml();
+    let all_indexed_fields: Vec<String> = {
+        let mut set: BTreeSet<String> = sources::always_valid().into_iter().collect();
+        if let Some(ref p) = sources_path {
+            for fields in sources::load_per_source_fields(p).into_values() {
+                set.extend(fields);
+            }
+        }
+        set.into_iter().collect()
+    };
+
+    let dbs = match query::index_buckets(&data_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("siemctl stats: {e}");
+            return Ok(1);
+        }
+    };
+
+    // Accumulate across all in-range buckets.
+    let mut source_counts: BTreeMap<Vec<String>, u64> = BTreeMap::new();
+    let mut type_counts: BTreeMap<Vec<String>, u64> = BTreeMap::new();
+    let mut total_events: u64 = 0;
+    let mut field_sums: HashMap<String, u64> = HashMap::new();
+
+    for db_path in &dbs {
+        // Time-range pruning by bucket filename.
+        if let Some(name) = db_path.file_name().and_then(|n| n.to_str()) {
+            let stem = name.trim_end_matches(".db");
+            if let Some(bkt) = time::HourBucket::parse(stem) {
+                if after.map(|a| bkt < a).unwrap_or(false) { continue; }
+                if before.map(|b| bkt > b).unwrap_or(false) { continue; }
+            }
+        }
+
+        let conn = match db::open_bucket_conn(db_path, &data_dir) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        if source.is_none() {
+            // GROUP BY _source_type to get per-source counts.
+            let _ = db::fold_group_sql(
+                &conn,
+                "SELECT _source_type, COUNT(*) FROM events GROUP BY _source_type",
+                &[],
+                1,
+                &mut source_counts,
+            );
+        } else {
+            // GROUP BY event_type for the given source.
+            let src = source.as_ref().unwrap().clone();
+            let _ = db::fold_group_sql(
+                &conn,
+                "SELECT event_type, COUNT(*) FROM events WHERE _source_type = ? \
+                 GROUP BY event_type ORDER BY COUNT(*) DESC",
+                &[src],
+                1,
+                &mut type_counts,
+            );
+        }
+
+        // Field coverage.
+        if let Ok((total, counts)) = db::field_coverage(&conn, &all_indexed_fields, source.as_deref()) {
+            total_events += total;
+            for (f, c) in counts {
+                *field_sums.entry(f).or_default() += c;
+            }
+        }
+    }
+
+    // Print results.
+    let fmt_n = |n: u64| -> String {
+        // Insert comma separators for readability.
+        let s = n.to_string();
+        let mut out = String::new();
+        for (i, c) in s.chars().rev().enumerate() {
+            if i > 0 && i % 3 == 0 { out.push(','); }
+            out.push(c);
+        }
+        out.chars().rev().collect()
+    };
+
+    if source.is_none() {
+        println!("── Event counts by source {}", "─".repeat(25));
+        if source_counts.is_empty() {
+            println!("  (no data)");
+        } else {
+            let grand_total: u64 = source_counts.values().sum();
+            // Sort by count descending for easier reading.
+            let mut sorted: Vec<_> = source_counts.iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(a.1));
+            for (key, count) in &sorted {
+                let src = key.first().map(String::as_str).unwrap_or("?");
+                println!("  {:<24}  {:>10}", src, fmt_n(**count));
+            }
+            println!("  {}", "─".repeat(37));
+            println!("  {:<24}  {:>10}", "total", fmt_n(grand_total));
+        }
+    } else {
+        let src = source.as_deref().unwrap_or("?");
+        println!("── {} — event types {}", src, "─".repeat(30usize.saturating_sub(src.len())));
+        if type_counts.is_empty() {
+            println!("  (no data for source '{src}')");
+        } else {
+            let mut sorted: Vec<_> = type_counts.iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(a.1));
+            for (key, count) in &sorted {
+                let et = key.first().map(String::as_str).unwrap_or("(none)");
+                println!("  {:<30}  {:>10}", et, fmt_n(**count));
+            }
+            println!("  {}", "─".repeat(43));
+            println!("  {:<30}  {:>10}", format!("total ({})", src), fmt_n(total_events));
+        }
+    }
+
+    if total_events == 0 {
+        return Ok(if source_counts.is_empty() && type_counts.is_empty() { 1 } else { 0 });
+    }
+
+    let section = match &source {
+        Some(s) => format!("{s} — field coverage"),
+        None => "Field coverage".to_string(),
+    };
+    println!("\n── {} {}", section, "─".repeat(40usize.saturating_sub(section.len())));
+    println!("  {:<24}  {:>10}  {:>8}", "Field", "Events", "Coverage");
+    println!("  {}", "─".repeat(47));
+
+    // Print fields sorted by coverage descending, then name.
+    let mut cov_rows: Vec<(&str, u64)> = all_indexed_fields
+        .iter()
+        .map(|f| (f.as_str(), *field_sums.get(f).unwrap_or(&0)))
+        .collect();
+    cov_rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+
+    for (field, count) in cov_rows {
+        let pct = if total_events > 0 {
+            format!("{:>6.1}%", count as f64 / total_events as f64 * 100.0)
+        } else {
+            "     —".to_string()
+        };
+        println!("  {:<24}  {:>10}  {}", field, fmt_n(count), pct);
+    }
+
+    Ok(0)
 }
 
 // ── cmd: search ────────────────────────────────────────────────────────────

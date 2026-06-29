@@ -1,5 +1,5 @@
 use rusqlite::{Connection, OpenFlags};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -287,6 +287,69 @@ fn row_to_record(row: &rusqlite::Row, cols: &[String]) -> Record {
         rec.push((col.clone(), val));
     }
     rec
+}
+
+/// Return the column names of the `events` table in `conn` (via PRAGMA table_info).
+pub fn bucket_columns(conn: &Connection) -> Vec<String> {
+    let mut cols = Vec::new();
+    let Ok(mut stmt) = conn.prepare("PRAGMA table_info(events)") else {
+        return cols;
+    };
+    let Ok(mut rows) = stmt.query([]) else { return cols };
+    while let Ok(Some(row)) = rows.next() {
+        if let Ok(name) = row.get::<_, String>(1) {
+            cols.push(name);
+        }
+    }
+    cols
+}
+
+/// Count total events and per-field non-empty values in one SQL pass.
+/// Fields that are absent from the bucket schema are silently skipped.
+/// `source` optionally restricts the count to one `_source_type` value.
+pub fn field_coverage(
+    conn: &Connection,
+    fields: &[String],
+    source: Option<&str>,
+) -> rusqlite::Result<(u64, HashMap<String, u64>)> {
+    let cols = bucket_columns(conn);
+    let existing: Vec<&String> = fields.iter().filter(|f| cols.contains(f)).collect();
+
+    let where_clause = if source.is_some() { " WHERE _source_type = ?" } else { "" };
+
+    if existing.is_empty() {
+        let sql = format!("SELECT COUNT(*) FROM events{where_clause}");
+        let total: i64 = if let Some(src) = source {
+            conn.query_row(&sql, [src], |r| r.get(0))?
+        } else {
+            conn.query_row(&sql, [], |r| r.get(0))?
+        };
+        return Ok((total as u64, HashMap::new()));
+    }
+
+    let mut selects = vec!["COUNT(*)".to_string()];
+    for f in &existing {
+        selects.push(format!(
+            "SUM(CASE WHEN {f} IS NOT NULL AND {f} != '' THEN 1 ELSE 0 END)"
+        ));
+    }
+    let sql = format!("SELECT {} FROM events{}", selects.join(", "), where_clause);
+
+    let row_fn = |row: &rusqlite::Row| {
+        let total: i64 = row.get(0)?;
+        let mut counts = HashMap::new();
+        for (i, f) in existing.iter().enumerate() {
+            let count: i64 = row.get(i + 1).unwrap_or(0);
+            counts.insert((*f).clone(), count as u64);
+        }
+        Ok((total as u64, counts))
+    };
+
+    if let Some(src) = source {
+        conn.query_row(&sql, [src], row_fn)
+    } else {
+        conn.query_row(&sql, [], row_fn)
+    }
 }
 
 #[cfg(test)]

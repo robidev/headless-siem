@@ -6,8 +6,8 @@
 //! produced by `normalized`'s zero-config format chain (CEF/LEEF/JSON/logfmt/…)
 //! are invisible here, so the cross-check treats its findings as advisory.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 
 /// TOML keys that are part of the rule grammar, not extracted fields. A
 /// top-level `key = "..."` whose key is one of these is structural, not a
@@ -34,6 +34,95 @@ pub struct Producible {
 pub fn load(path: &Path) -> Option<Producible> {
     let content = std::fs::read_to_string(path).ok()?;
     Some(parse(&content))
+}
+
+/// Load fields grouped by `app_name` from a normalized.toml file.
+/// Returns a sorted map: app_name → sorted set of all fields the source produces
+/// (named captures from patterns + keys from `set = { ... }` blocks).
+pub fn load_per_source(path: &Path) -> BTreeMap<String, BTreeSet<String>> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|c| parse_per_source(&c))
+        .unwrap_or_default()
+}
+
+/// Parse normalized.toml content into a per-app_name field map.
+pub fn parse_per_source(content: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut result: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut current_app: Option<String> = None;
+
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        // A new [[...]] block resets the app_name context.
+        if line.starts_with("[[") {
+            current_app = None;
+            continue;
+        }
+        // app_name = "source" sets the context for the current block.
+        if line.starts_with("app_name") {
+            if let Some(eq) = line.find('=') {
+                let val = line[eq + 1..].trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    current_app = Some(val.to_string());
+                }
+            }
+            continue;
+        }
+        let Some(ref app) = current_app else { continue };
+        // Named regex captures: (?P<name>...)
+        let mut rest = line;
+        while let Some(i) = rest.find("(?P<") {
+            rest = &rest[i + 4..];
+            if let Some(j) = rest.find('>') {
+                let name = &rest[..j];
+                if is_ident(name) && !RESERVED.contains(&name) {
+                    result.entry(app.clone()).or_default().insert(name.to_string());
+                }
+                rest = &rest[j + 1..];
+            } else {
+                break;
+            }
+        }
+        // set = { key = "value", ... }
+        if let Some(open) = line.find('{') {
+            if line[..open].contains("set") {
+                let close = line.rfind('}').unwrap_or(line.len());
+                let inner = &line[open + 1..close];
+                for part in inner.split(',') {
+                    if let Some(k) = part.split('=').next() {
+                        let k = k.trim();
+                        if is_ident(k) && !RESERVED.contains(&k) {
+                            result.entry(app.clone()).or_default().insert(k.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Locate `config/normalized.toml` relative to cwd or the running binary.
+pub fn find_normalized_toml() -> Option<PathBuf> {
+    for rel in &["config/normalized.toml", "../config/normalized.toml"] {
+        let p = Path::new(rel);
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?;
+    for _ in 0..6 {
+        let c = dir.join("config").join("normalized.toml");
+        if c.is_file() {
+            return Some(c);
+        }
+        dir = dir.parent()?;
+    }
+    None
 }
 
 /// Scan normalized.toml content. Split out from [`load`] for unit testing.
