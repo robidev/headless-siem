@@ -69,4 +69,3 @@ printf '<34>1 2024-06-26T12:00:00Z host sshd 1234 - - Failed password for root f
 - Running `normalized` as a service: create a systemd unit that runs the binary and configure rsyslog `omprog`/pipe to point to it.
 
 ---
-Short and practical; if you want I can add a `systemd` service unit example and a debian packaging note.

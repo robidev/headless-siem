@@ -121,7 +121,7 @@ You should see alert JSONL on stdout. Each alert has `_ruled: true`, a `rule_id`
 cat tests/fixtures/mixed.log | \
   target/debug/normalized --stdin --data-dir data/ | \
   target/debug/ruled --rules config/rules/ | \
-  target/debug/correlated --threshold 3 --output data/correlated/
+  target/debug/correlated --config config/correlations.toml --output data/correlated/
 ```
 
 ### Step 7: Use siemctl
@@ -525,7 +525,7 @@ Headless SIEM is a pipeline of five small, single-purpose binaries connected by 
      ├──→ data/raw/YYYY/MM/DD/HH/MM/SS/<source>.jsonl
      │    data/raw/YYYY/MM/DD/HH/MM/SS/<source>.tsv
      │
-     │    indexd (inotify watcher) ──→ data/index/<YYYYMMDDHH>.db
+     │    indexd (inotify watcher) ──→ data/index/YYYY-MM-DD-HH.db
      │
      └──→ ruled ──→ alerts to stdout
             │
@@ -545,7 +545,7 @@ data/
 │       ├── <source>.jsonl      # One JSON object per line
 │       └── <source>.tsv       # Sidecar: timestamp, src_ip, dst_ip, event_type, severity, source
 ├── index/                      # SQLite indexes (one per clock-hour)
-│   └── YYYYMMDDHH.db           # Indexed fields from sources.toml
+│   └── YYYY-MM-DD-HH.db        # Indexed fields from sources.toml
 ├── alerts/                     # Rule engine output
 │   └── YYYY/MM/DD/HH/
 │       └── alerts.jsonl

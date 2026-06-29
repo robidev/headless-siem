@@ -8,7 +8,7 @@ A minimal, Unix-philosophy SIEM for home-lab environments. Filesystem is the dat
 rsyslog ──omprog──→ normalized ──→ data/raw/YYYY/MM/DD/HH/MM/SS/<source>.jsonl
   (disk-queued)      (Rust)         data/raw/.../<source>.tsv (sidecar)
                        │
-                  indexd (Rust) ──→ data/index/YYYY/MM/DD/HH/MM/SS.db
+                  indexd (Rust) ──→ data/index/YYYY-MM-DD-HH.db
                        │              (timestamp, src_ip, dst_ip, event_type, severity, offset)
                        │
                   ruled (Rust)  ──→ data/alerts/YYYY/MM/DD/HH/alerts.jsonl
@@ -61,8 +61,8 @@ make run
 │       ├── router.tsv
 │       ├── sshd.jsonl
 │       └── sshd.tsv
-├── index/              # Companion SQLite indexes
-│   └── 2026/06/22/08/55/03.db
+├── index/              # Companion SQLite indexes (one per clock-hour)
+│   └── 2026-06-22-08.db
 └── alerts/             # Rule engine output
     └── 2026/06/22/08/
         └── alerts.jsonl
@@ -79,7 +79,7 @@ make run
 - **Correlation** — `correlated` reads the alert stream and produces compound alerts from related events.
 - **CLI** — `siemctl` provides search, status, retention, and dry-run parsing.
 - **Integration tests** — 4 test scripts in `tests/integration/` exercise the full pipeline end-to-end.
-- **Documentation** — 5 guides in `docs/` covering parsers, detection rules, indexing verification, correlation testing, and a user guide.
+- **Documentation** — Guides and design docs in `docs/` covering parsers, detection rules, indexing verification, correlation testing, a user guide, and SOC improvement roadmap.
 
 ### In Progress / Known Gaps
 
