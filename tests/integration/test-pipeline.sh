@@ -15,11 +15,11 @@ PASS=0
 FAIL=0
 
 # ── Binaries ──────────────────────────────────────────────────────────
-NORMALIZED="$PROJECT_ROOT/src/normalized/target/debug/normalized"
-INDEXD="$PROJECT_ROOT/src/indexd/target/debug/indexd"
-RULED="$PROJECT_ROOT/src/ruled/target/debug/ruled"
-CORRELATED="$PROJECT_ROOT/src/correlated/target/debug/correlated"
-SIEMCTL="$PROJECT_ROOT/src/siemctl/target/debug/siemctl"
+NORMALIZED="$PROJECT_ROOT/target/debug/normalized"
+INDEXD="$PROJECT_ROOT/target/debug/indexd"
+RULED="$PROJECT_ROOT/target/debug/ruled"
+CORRELATED="$PROJECT_ROOT/target/debug/correlated"
+SIEMCTL="$PROJECT_ROOT/target/debug/siemctl"
 FIXTURE="$PROJECT_ROOT/tests/fixtures/mixed.log"
 RULES_DIR="$PROJECT_ROOT/config/rules"
 

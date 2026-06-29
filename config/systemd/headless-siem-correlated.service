@@ -10,7 +10,7 @@ Type=simple
 User=user
 Environment=HEADLESS_SIEM_ROOT=/home/user/projects/headless-siem
 WorkingDirectory=/home/user/projects/headless-siem
-ExecStart=/home/user/projects/headless-siem/src/correlated/target/release/correlated \
+ExecStart=/home/user/projects/headless-siem/target/release/correlated \
   --window 300 \
   --threshold 5 \
   --output /home/user/projects/headless-siem/data/correlated

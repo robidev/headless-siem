@@ -10,7 +10,7 @@ Type=simple
 User=user
 Environment=HEADLESS_SIEM_ROOT=/home/user/projects/headless-siem
 WorkingDirectory=/home/user/projects/headless-siem
-ExecStart=/home/user/projects/headless-siem/src/ruled/target/release/ruled \
+ExecStart=/home/user/projects/headless-siem/target/release/ruled \
   --rules /home/user/projects/headless-siem/config/rules \
   --output /home/user/projects/headless-siem/data/alerts
 StandardInput=file:/run/headless-siem/normalized-out.pipe

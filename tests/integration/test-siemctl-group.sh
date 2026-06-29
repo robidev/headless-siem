@@ -22,9 +22,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
-NORMALIZED="$PROJECT_ROOT/src/normalized/target/debug/normalized"
-INDEXD="$PROJECT_ROOT/src/indexd/target/debug/indexd"
-SIEMCTL="$PROJECT_ROOT/src/siemctl/target/debug/siemctl"
+NORMALIZED="$PROJECT_ROOT/target/debug/normalized"
+INDEXD="$PROJECT_ROOT/target/debug/indexd"
+SIEMCTL="$PROJECT_ROOT/target/debug/siemctl"
 FIXTURE="$PROJECT_ROOT/tests/fixtures/mixed.log"
 
 PASS=0; FAIL=0

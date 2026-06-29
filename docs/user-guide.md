@@ -32,11 +32,11 @@ This builds five Rust binaries:
 
 | Binary | Path | Purpose |
 |--------|------|---------|
-| `normalized` | `src/normalized/target/release/normalized` | Log parsing & normalization |
-| `indexd` | `src/indexd/target/release/indexd` | Filesystem watcher & SQLite indexer |
-| `ruled` | `src/ruled/target/release/ruled` | Sigma rule engine |
-| `correlated` | `src/correlated/target/release/correlated` | Sliding-window correlation |
-| `siemctl` | `src/siemctl/target/release/siemctl` | CLI for search, status, retention |
+| `normalized` | `target/release/normalized` | Log parsing & normalization |
+| `indexd` | `target/release/indexd` | Filesystem watcher & SQLite indexer |
+| `ruled` | `target/release/ruled` | Sigma rule engine |
+| `correlated` | `target/release/correlated` | Sliding-window correlation |
+| `siemctl` | `target/release/siemctl` | CLI for search, status, retention |
 
 For development/debugging, debug binaries are at `src/<name>/target/debug/<name>`.
 
@@ -44,11 +44,11 @@ For development/debugging, debug binaries are at `src/<name>/target/debug/<name>
 
 ```bash
 # Check each binary runs
-src/normalized/target/debug/normalized --help
-src/indexd/target/debug/indexd --help
-src/ruled/target/debug/ruled --help
-src/correlated/target/debug/correlated --help
-src/siemctl/target/debug/siemctl --help
+target/debug/normalized --help
+target/debug/indexd --help
+target/debug/ruled --help
+target/debug/correlated --help
+target/debug/siemctl --help
 
 # Run unit tests
 make test
@@ -71,7 +71,7 @@ mkdir -p data/{raw,index,alerts,correlated}
 ```bash
 # Pipe a sample log through the normalizer
 cat tests/fixtures/mixed.log | \
-  src/normalized/target/debug/normalized --stdin --data-dir data/
+  target/debug/normalized --stdin --data-dir data/
 ```
 
 You should see JSONL output on stdout and files created under `data/raw/`.
@@ -93,7 +93,7 @@ head -2 $(find data/raw/ -name '*.tsv' | head -1)
 
 ```bash
 # Start indexd in the background — it watches for new files
-src/indexd/target/debug/indexd --data-dir data/ &
+target/debug/indexd --data-dir data/ &
 INDEXD_PID=$!
 sleep 2  # let it scan existing files
 
@@ -108,8 +108,8 @@ sqlite3 $(find data/index/ -name '*.db' | head -1) \
 ```bash
 # Pipe normalized output through the rule engine
 cat tests/fixtures/mixed.log | \
-  src/normalized/target/debug/normalized --stdin --data-dir data/ | \
-  src/ruled/target/debug/ruled --rules config/rules/ --output data/alerts/
+  target/debug/normalized --stdin --data-dir data/ | \
+  target/debug/ruled --rules config/rules/ --output data/alerts/
 ```
 
 You should see alert JSONL on stdout. Each alert has `_ruled: true`, a `rule_id`, and the triggering event.
@@ -119,30 +119,30 @@ You should see alert JSONL on stdout. Each alert has `_ruled: true`, a `rule_id`
 ```bash
 # Pipe alerts through the correlation engine
 cat tests/fixtures/mixed.log | \
-  src/normalized/target/debug/normalized --stdin --data-dir data/ | \
-  src/ruled/target/debug/ruled --rules config/rules/ | \
-  src/correlated/target/debug/correlated --threshold 3 --output data/correlated/
+  target/debug/normalized --stdin --data-dir data/ | \
+  target/debug/ruled --rules config/rules/ | \
+  target/debug/correlated --threshold 3 --output data/correlated/
 ```
 
 ### Step 7: Use siemctl
 
 ```bash
 # Check system status
-src/siemctl/target/debug/siemctl status --data-dir data/
+target/debug/siemctl status --data-dir data/
 
 # Search for events by IP (uses SQLite index)
-src/siemctl/target/debug/siemctl search --data-dir data/ \
+target/debug/siemctl search --data-dir data/ \
   --field src_ip --value "10.0.0.5"
 
 # Search by time range
-src/siemctl/target/debug/siemctl search --data-dir data/ \
+target/debug/siemctl search --data-dir data/ \
   --source sshd --after "2026-06-22T08" --before "2026-06-22T09"
 
 # Stream live events
-src/siemctl/target/debug/siemctl tail --data-dir data/
+target/debug/siemctl tail --data-dir data/
 
 # Validate config and rules
-src/siemctl/target/debug/siemctl validate \
+target/debug/siemctl validate \
   --config config/sources.toml --rules config/rules/
 ```
 
@@ -290,11 +290,11 @@ If `logsource` is omitted, the rule matches all events regardless of source.
 ```bash
 # Dry-run: see which rules fire against sample data
 cat tests/fixtures/mixed.log | \
-  src/normalized/target/debug/normalized --stdin --dry-run | \
-  src/ruled/target/debug/ruled --rules config/rules/
+  target/debug/normalized --stdin --dry-run | \
+  target/debug/ruled --rules config/rules/
 
 # Or use siemctl dry-run
-src/siemctl/target/debug/siemctl dry-run \
+target/debug/siemctl dry-run \
   --file tests/fixtures/mixed.log \
   --config config/normalized.toml \
   --rules config/rules/

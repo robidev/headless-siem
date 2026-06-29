@@ -36,8 +36,8 @@ standard library.
 
 ```bash
 # Build
-cargo build --release --manifest-path src/normalized/Cargo.toml
-BIN=./src/normalized/target/release/normalized
+cargo build --release -p normalized
+BIN=./target/release/normalized
 
 # 1. Normalize a syslog file to stdout only (no files written)
 cat /var/log/syslog | $BIN --stdin --dry-run | head

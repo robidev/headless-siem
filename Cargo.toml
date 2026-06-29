@@ -1,0 +1,19 @@
+# ── Headless SIEM — Cargo workspace ───────────────────────────────────
+# Five standalone binaries sharing one Cargo.lock and one target/ dir.
+# Build all: `cargo build --release` (or `make` / `just all`).
+# Build one: `cargo build --release -p ruled`.
+[workspace]
+resolver = "2"
+members = [
+    "src/normalized",
+    "src/indexd",
+    "src/ruled",
+    "src/correlated",
+    "src/siemctl",
+]
+
+# Release profile applied to every workspace member (previously set only on
+# normalized): optimize fully and strip symbols for small, fast binaries.
+[profile.release]
+opt-level = 3
+strip = true

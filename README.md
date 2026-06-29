@@ -45,7 +45,7 @@ rsyslog ──omprog──→ normalized ──→ data/raw/YYYY/MM/DD/HH/MM/SS/
 make
 
 # Test a parser against sample logs
-cat tests/fixtures/sshd.log | ./src/normalized/target/release/normalized --stdin --dry-run --source sshd
+cat tests/fixtures/sshd.log | ./target/release/normalized --stdin --dry-run --source sshd
 
 # Run the full pipeline
 make run

@@ -4,21 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build Commands
 
+The five crates form a **Cargo workspace** (root `Cargo.toml`): one `Cargo.lock`, one shared `target/` directory. Run cargo from the repo root.
+
 ```bash
 # Build all 5 binaries (release mode)
-make           # or: just all
+make           # or: just all  — both wrap `cargo build --release`
 
-# Build a single Rust crate
-cd src/<crate> && cargo build --release
-
-# Build siemctl
-cd src/siemctl && cargo build --release
+# Build a single crate
+cargo build --release -p ruled
 
 # Run all tests (cargo unit tests + integration tests)
-make test      # or: just test
+make test      # or: just test — wraps `cargo test` + the integration scripts
 
-# Run tests for a single Rust crate
-cd src/<crate> && cargo test
+# Run tests for a single crate
+cargo test -p ruled
 
 # Run a single integration test
 bash tests/integration/test-pipeline.sh
@@ -27,7 +26,7 @@ bash tests/integration/test-pipeline.sh
 make install
 ```
 
-> Integration tests use **debug** binaries, not release. Build with `cargo build` (no `--release`) before running them.
+> Integration tests use **debug** binaries from `target/debug/`, not release. Build with `cargo build` (no `--release`) before running them.
 
 ## Architecture
 
@@ -73,7 +72,7 @@ Most sources need no code — try these in order:
 
 Test without writing files:
 ```bash
-cat sample.log | ./src/normalized/target/release/normalized --stdin --dry-run --source name | jq .
+cat sample.log | ./target/release/normalized --stdin --dry-run --source name | jq .
 ```
 
 ## Data Invariants
@@ -88,18 +87,18 @@ cat sample.log | ./src/normalized/target/release/normalized --stdin --dry-run --
 Rules live in `config/rules/*.yml`. `ruled` evaluates every rule against every event. Alerts are deduplicated within a 5-second window. To test a rule:
 
 ```bash
-cat data/raw/**/*.jsonl | ./src/ruled/target/release/ruled --rules config/rules/ --dry-run
+cat data/raw/**/*.jsonl | ./target/release/ruled --rules config/rules/ --dry-run
 ```
 
 ## Useful Dev Patterns
 
 ```bash
 # Dry-run a parser against a fixture
-cat tests/fixtures/sshd.log | ./src/normalized/target/release/normalized --stdin --dry-run --source sshd | jq .
+cat tests/fixtures/sshd.log | ./target/release/normalized --stdin --dry-run --source sshd | jq .
 
 # Count normalized vs unnormalized lines
 cat tests/fixtures/mixed.log | \
-  ./src/normalized/target/release/normalized --stdin --dry-run | \
+  ./target/release/normalized --stdin --dry-run | \
   jq -r '._normalized' | sort | uniq -c
 
 # Grep raw data without JSON parsing

@@ -92,7 +92,7 @@ Verify `correlated` starts and basic passthrough works:
 
 ```bash
 # Build if needed
-cd src/correlated && cargo build --release
+cargo build --release -p correlated
 
 # Help
 ./target/release/correlated --help

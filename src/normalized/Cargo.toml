@@ -15,7 +15,3 @@ path = "src/main.rs"
 [dependencies]
 chrono = "0.4"
 regex = "1"
-
-[profile.release]
-opt-level = 3
-strip = true

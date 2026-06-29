@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BINARY="$PROJECT_ROOT/src/normalized/target/release/normalized"
+BINARY="$PROJECT_ROOT/target/release/normalized"
 FIXTURES="$PROJECT_ROOT/tests/fixtures"
 
 # Build if needed

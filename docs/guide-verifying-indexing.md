@@ -57,7 +57,7 @@ data/index/YYYY-MM-DD-HH.db
 ## Prerequisites
 
 - `normalized` is running and writing `.jsonl` files to `data/raw/`
-- `indexd` is built: `cd src/indexd && cargo build --release`
+- `indexd` is built: `cargo build --release -p indexd`
 - `config/sources.toml` has your source registered with `index_fields`
 
 ---
@@ -99,7 +99,7 @@ Start `indexd` pointing at the same data directory as `normalized`:
 
 ```bash
 # From the project root
-./src/indexd/target/release/indexd --data-dir ./data
+./target/release/indexd --data-dir ./data
 ```
 
 **Expected startup output:**

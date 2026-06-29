@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-RULED="$PROJECT_ROOT/src/ruled/target/debug/ruled"
+RULED="$PROJECT_ROOT/target/debug/ruled"
 RULES_DIR="$PROJECT_ROOT/config/rules"
 
 if [ ! -x "$RULED" ]; then

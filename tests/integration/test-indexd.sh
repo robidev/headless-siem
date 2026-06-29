@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BINARY="$PROJECT_ROOT/src/indexd/target/release/indexd"
+BINARY="$PROJECT_ROOT/target/release/indexd"
 
 if [ ! -x "$BINARY" ]; then
     echo "Building indexd..."

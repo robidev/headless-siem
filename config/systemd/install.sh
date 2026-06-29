@@ -26,18 +26,17 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # ── Determine binary paths ────────────────────────────────────────────
+# Workspace build: all binaries land in the shared $PROJECT_ROOT/target/.
 if [[ "$BUILD_TYPE" == "release" ]]; then
-    NORMALIZED="$PROJECT_ROOT/src/normalized/target/release/normalized"
-    INDEXD="$PROJECT_ROOT/src/indexd/target/release/indexd"
-    RULED="$PROJECT_ROOT/src/ruled/target/release/ruled"
-    CORRELATED="$PROJECT_ROOT/src/correlated/target/release/correlated"
+    BUILD_DIR="$PROJECT_ROOT/target/release"
 else
-    NORMALIZED="$PROJECT_ROOT/src/normalized/target/debug/normalized"
-    INDEXD="$PROJECT_ROOT/src/indexd/target/debug/indexd"
-    RULED="$PROJECT_ROOT/src/ruled/target/debug/ruled"
-    CORRELATED="$PROJECT_ROOT/src/correlated/target/debug/correlated"
+    BUILD_DIR="$PROJECT_ROOT/target/debug"
 fi
-SIEMCTL="$PROJECT_ROOT/src/siemctl/siemctl"
+NORMALIZED="$BUILD_DIR/normalized"
+INDEXD="$BUILD_DIR/indexd"
+RULED="$BUILD_DIR/ruled"
+CORRELATED="$BUILD_DIR/correlated"
+SIEMCTL="$BUILD_DIR/siemctl"
 
 # ── Verify binaries exist ─────────────────────────────────────────────
 echo "Checking binaries..."
@@ -94,10 +93,10 @@ for svc in normalized indexd ruled correlated pipes; do
     if [[ -f "$SRC" ]]; then
         # Copy and adjust paths for installed layout
         sed \
-            -e "s|/home/user/projects/headless-siem/src/normalized/target/release/normalized|/usr/local/bin/headless-siem-normalized|g" \
-            -e "s|/home/user/projects/headless-siem/src/indexd/target/release/indexd|/usr/local/bin/headless-siem-indexd|g" \
-            -e "s|/home/user/projects/headless-siem/src/ruled/target/release/ruled|/usr/local/bin/headless-siem-ruled|g" \
-            -e "s|/home/user/projects/headless-siem/src/correlated/target/release/correlated|/usr/local/bin/headless-siem-correlated|g" \
+            -e "s|/home/user/projects/headless-siem/target/release/normalized|/usr/local/bin/headless-siem-normalized|g" \
+            -e "s|/home/user/projects/headless-siem/target/release/indexd|/usr/local/bin/headless-siem-indexd|g" \
+            -e "s|/home/user/projects/headless-siem/target/release/ruled|/usr/local/bin/headless-siem-ruled|g" \
+            -e "s|/home/user/projects/headless-siem/target/release/correlated|/usr/local/bin/headless-siem-correlated|g" \
             -e "s|/home/user/projects/headless-siem/data|/var/lib/headless-siem|g" \
             -e "s|/home/user/projects/headless-siem/config|/etc/headless-siem|g" \
             -e "s|WorkingDirectory=/home/user/projects/headless-siem|WorkingDirectory=/var/lib/headless-siem|g" \

@@ -21,7 +21,7 @@ Type=simple
 User=user
 WorkingDirectory=/home/user/projects/headless-siem
 
-ExecStart=/home/user/projects/headless-siem/src/normalized/target/release/normalized \
+ExecStart=/home/user/projects/headless-siem/target/release/normalized \
   --stdin \
   --data-dir /home/user/projects/headless-siem/data \
   --config /home/user/projects/headless-siem/config/normalized.toml

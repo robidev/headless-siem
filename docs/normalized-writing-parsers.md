@@ -286,7 +286,7 @@ envelope fields.
 Use `--dry-run` to see output without writing files:
 
 ```bash
-BIN=./src/normalized/target/debug/normalized
+BIN=./target/debug/normalized
 
 # Single line
 echo 'KV2|host:web1|sev:err|msg:disk full' | $BIN --stdin --dry-run
@@ -319,7 +319,7 @@ fn kv2_is_detected_and_flattened() {
 Run the suite:
 
 ```bash
-cargo test --manifest-path src/normalized/Cargo.toml
+cargo test -p normalized
 ```
 
 ---
