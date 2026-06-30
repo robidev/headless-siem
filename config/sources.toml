@@ -67,7 +67,7 @@ index_fields = ["src_ip", "query", "event_type"]
 [source.haproxy]
 index_fields = ["src_ip", "src_port", "frontend", "backend", "event_type", "http_method", "http_uri"]
 
-[source.CRON]
+[source.cron]
 index_fields = ["cron_user", "command", "event_type"]
 
 [source.systemd-logind]

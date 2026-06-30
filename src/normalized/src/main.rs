@@ -430,20 +430,23 @@ fn strip_octet_count(s: &str) -> &[u8] {
     bytes
 }
 
-/// Canonicalize OpenSSH privilege-separation subprocess names back to `sshd`.
+/// Canonicalize a program/app name to a stable, lowercase source label.
 ///
-/// OpenSSH 9.8+ splits the daemon into `sshd` (listener), `sshd-session`
-/// (per-connection) and `sshd-auth` processes. The auth events we care about
-/// (Failed/Accepted password, pam session open/close) now log under
-/// `sshd-session`. Folding these to `sshd` keeps the source bucket and the
-/// `app_name = "sshd"` extract rules working across OpenSSH versions. The
-/// original program name remains visible in `_raw`.
+/// Two cases are folded:
+///   - OpenSSH 9.8+ privilege-separation subprocesses (`sshd-session`,
+///     `sshd-auth`) → `sshd`, so auth events log under one label across
+///     OpenSSH versions.
+///   - Debian cron's uppercase `CRON` program name → `cron`, so the source
+///     label matches the lowercase convention used by every other source
+///     (the Sigma logsource match in `ruled` is case-sensitive).
 ///
-/// Returns `Some(canonical)` only when a rewrite is needed, so callers can skip
-/// the allocation otherwise.
+/// The original program name remains visible in `_raw`. Returns
+/// `Some(canonical)` only when a rewrite is needed, so callers can skip the
+/// allocation otherwise.
 fn canonical_app_name(app: &str) -> Option<&'static str> {
     match app {
         "sshd-session" | "sshd-auth" => Some("sshd"),
+        "CRON" => Some("cron"),
         _ => None,
     }
 }
@@ -573,11 +576,14 @@ mod tests {
     }
 
     #[test]
-    fn openssh_subprocess_names_fold_to_sshd() {
+    fn app_names_are_canonicalized() {
         assert_eq!(canonical_app_name("sshd-session"), Some("sshd"));
         assert_eq!(canonical_app_name("sshd-auth"), Some("sshd"));
+        // Debian's uppercase CRON folds to the lowercase convention.
+        assert_eq!(canonical_app_name("CRON"), Some("cron"));
         // Already-canonical and unrelated names are left untouched.
         assert_eq!(canonical_app_name("sshd"), None);
+        assert_eq!(canonical_app_name("cron"), None);
         assert_eq!(canonical_app_name("sudo"), None);
         assert_eq!(canonical_app_name("sshd-foo"), None);
     }

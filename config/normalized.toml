@@ -381,12 +381,12 @@ set = { event_type = "tls_handshake_failure", severity = "warning" }
 # ─────────────────────────────────────────────────────────────────────────────
 
 [[extract.rule]]
-app_name = "CRON"
+app_name = "cron"
 from = "message"
 pattern = "^\((?P<cron_user>[^)]+)\) (?P<cron_action>CMD) \((?P<command>.+)\)\s*$"
 
 [[extract.rule]]
-app_name = "CRON"
+app_name = "cron"
 cron_action = "CMD"
 set = { event_type = "cron_exec" }
 
