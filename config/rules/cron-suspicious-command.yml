@@ -1,0 +1,34 @@
+title: Suspicious Cron Command
+id: 1006-cron-suspicious-command
+status: experimental
+level: high
+description: >
+  A cron job executed a command containing download-and-execute, reverse-shell,
+  interpreter-pipe or base64-decode patterns. Cron is a common persistence and
+  execution mechanism (MITRE T1053.003); legitimate jobs rarely pull and run
+  remote code or spawn interactive shells.
+logsource:
+  service: cron
+detection:
+  selection:
+    _source_type: cron
+    event_type: cron_exec
+  s_wget:
+    command|contains: 'wget '
+  s_curl:
+    command|contains: 'curl '
+  s_revshell:
+    command|contains: 'bash -i'
+  s_devtcp:
+    command|contains: '/dev/tcp/'
+  s_nc:
+    command|contains: 'nc -'
+  s_pipe_sh:
+    command|contains: '| sh'
+  s_pipe_bash:
+    command|contains: '| bash'
+  s_python_c:
+    command|contains: 'python -c'
+  s_base64:
+    command|contains: 'base64 -d'
+  condition: selection and 1 of s_*

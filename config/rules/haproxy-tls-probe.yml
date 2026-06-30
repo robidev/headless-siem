@@ -1,0 +1,18 @@
+title: Unauthorized TLS Probe of Reverse Proxy
+id: 1007-haproxy-tls-probe
+status: experimental
+level: medium
+description: >
+  HAProxy rejected a TLS handshake (missing/invalid client certificate, no
+  shared cipher, or unsupported protocol). This deployment fronts internal
+  services with a client-certificate-verifying proxy, so a handshake failure is
+  a connection that could not authenticate. Repeated failures from one source
+  indicate scanning or an attempt to reach a protected service without a valid
+  client certificate (MITRE T1190 / T1133).
+logsource:
+  service: haproxy
+detection:
+  selection:
+    _source_type: haproxy
+    event_type: tls_handshake_failure
+  condition: selection

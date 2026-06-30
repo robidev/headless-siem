@@ -1,0 +1,33 @@
+title: Sudo Root Shell or Sensitive Binary
+id: 1008-sudo-privilege-escalation
+status: experimental
+level: high
+description: >
+  A user invoked sudo to run an interactive shell or a sensitive
+  account/credential binary as root. Spawning a root shell via sudo is a common
+  way to escape command-level auditing and escalate to full root (MITRE T1548.003),
+  distinct from the routine per-command sudo monitoring in rule 1002.
+logsource:
+  service: sudo
+detection:
+  selection:
+    _source_type: sudo
+    event_type: sudo_command
+    target_user: root
+  p_bash:
+    command|contains: '/bash'
+  p_sh:
+    command|endswith: '/sh'
+  p_dash:
+    command|contains: '/dash'
+  p_zsh:
+    command|contains: '/zsh'
+  p_su:
+    command|contains: '/su'
+  p_passwd:
+    command|contains: '/passwd'
+  p_visudo:
+    command|contains: 'visudo'
+  p_useradd:
+    command|contains: 'useradd'
+  condition: selection and 1 of p_*

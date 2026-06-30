@@ -1,0 +1,17 @@
+title: Local Authentication Failure
+id: 1010-local-auth-failure
+status: stable
+level: medium
+description: >
+  The unix_chkpwd PAM helper reported a failed password check. This fires for
+  local credential verification failures from su, login, screen-lock and other
+  PAM consumers. Repeated failures for a user indicate local password guessing
+  or an attacker attempting to switch users after a foothold (MITRE T1110 /
+  T1078).
+logsource:
+  service: unix_chkpwd
+detection:
+  selection:
+    _source_type: unix_chkpwd
+    event_type: local_auth_failure
+  condition: selection

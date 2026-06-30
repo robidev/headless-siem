@@ -85,3 +85,20 @@ ordered      = false
   [[rule.step]]
   rule_id   = "1001-ssh-brute-force"
   min_count = 10
+
+# ─── Port scan / network reconnaissance ──────────────────────────────────────
+# A single source IP triggers 15+ firewall blocks (rule 1009) within 2 minutes —
+# characteristic of a horizontal/vertical port scan. join_field = src_ip.
+# Requires ruled --dedup-window 0 so each blocked packet yields an alert (a scan
+# hits many distinct src_ip|event_type-identical ports; see dedup note above).
+[[rule]]
+id           = "port-scan"
+title        = "Port Scan / Network Reconnaissance"
+description  = "Same source IP blocked by the firewall 15+ times within 2 minutes — likely a port scan"
+window_seconds = 120
+join_field   = "src_ip"
+ordered      = false
+
+  [[rule.step]]
+  rule_id   = "1009-firewall-port-scan"
+  min_count = 15

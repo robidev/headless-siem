@@ -1,0 +1,17 @@
+title: Firewall Block (filterlog)
+id: 1009-firewall-port-scan
+status: stable
+level: low
+description: >
+  A pfSense filterlog rule blocked a connection. A single block is low-signal,
+  but many blocks from one source IP across different destination ports within a
+  short window indicate a port scan / network reconnaissance (MITRE T1046). The
+  scan escalation is performed by the 'port-scan' correlation rule, which counts
+  these alerts per source IP.
+logsource:
+  service: filterlog
+detection:
+  selection:
+    _source_type: filterlog
+    event_type: firewall_block
+  condition: selection
