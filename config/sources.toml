@@ -44,7 +44,7 @@ index_fields = ["src_ip", "src_port", "event_type"]
 index_fields = ["admin_user", "src_ip", "event_type", "pfsense_page"]
 
 [source.sshd]
-index_fields = ["src_ip", "event_type", "username"]
+index_fields = ["src_ip", "src_port", "dst_ip", "username", "event_type", "auth_method", "auth_action"]
 
 [source.sudo]
 index_fields = ["username", "event_type"]
@@ -64,8 +64,17 @@ index_fields = ["src_ip", "dst_ip", "event_type"]
 [source.dnsmasq]
 index_fields = ["src_ip", "query", "event_type"]
 
-[source.sshd-session]
-index_fields = ["src_ip", "src_port", "dst_ip", "dst_port", "username", "event_type", "auth_method"]
+[source.haproxy]
+index_fields = ["src_ip", "src_port", "frontend", "backend", "event_type", "http_method", "http_uri"]
+
+[source.CRON]
+index_fields = ["cron_user", "command", "event_type"]
+
+[source.systemd-logind]
+index_fields = ["username", "session_id", "session_class", "session_type", "event_type"]
+
+[source.unix_chkpwd]
+index_fields = ["username", "event_type"]
 
 # Catch-all: fields indexed when the source label doesn't match any entry above.
 [source.default]

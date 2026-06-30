@@ -66,6 +66,10 @@ pattern = "(?P<sshd_event>Did not receive identification string) from (?P<src_ip
 pattern = "(?P<sshd_event>Connection reset) by (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
 pattern = "(?P<sshd_event>Received disconnect) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
 pattern = "^(?P<auth_action>Timeout) before authentication for connection from (?P<src_ip>[\d.]+) to (?P<dst_ip>[\d.]+), pid = (?P<pid>[\d]+)"
+# Public-key auth records the key type and fingerprint after "ssh2:"
+pattern = "for (?P<username>\S+) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+) ssh2: (?P<key_type>\S+) (?P<key_fingerprint>\S+)"
+# Post-auth disconnect naming the user (distinct from the preauth "Received disconnect")
+pattern = "^(?P<ssh_disconnected>Disconnected) from user (?P<username>\S+) (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
 
 [[extract.rule]]
 app_name = "sshd"
@@ -115,6 +119,11 @@ set = { event_type = "ssh_conn_reset" }
 [[extract.rule]]
 app_name = "sshd"
 sshd_event = "Received disconnect"
+set = { event_type = "ssh_disconnect" }
+
+[[extract.rule]]
+app_name = "sshd"
+ssh_disconnected = "Disconnected"
 set = { event_type = "ssh_disconnect" }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,87 +256,6 @@ systemd_session = "Session"
 set = { event_type = "session_start" }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# sshd-session
-#
-# OpenSSH split-process variant; syslog tag is "sshd-session".
-#
-# Patterns handled:
-#   Accepted (password|publickey) for <user> from <ip> port <port> [ssh2[: <keytype> <fp>]]
-#   pam_unix(sshd:session): session (opened|closed) for user <user>
-#   Received disconnect from <ip> port <port>:N: <reason>
-#   Disconnected from user <user> <ip> port <port>
-#   Connection closed by [authenticating user <user> ]<ip> port <port> [preauth]
-#   error: connect_to <ip> port <port>: failed.       (port-forward failure)
-#   error: mm_reap: child terminated by signal <n>
-#   syslogin_perform_logout: logout() returned an error
-#   Read error from remote host <ip> port <port>: <reason>
-# ─────────────────────────────────────────────────────────────────────────────
-
-[[extract.rule]]
-app_name = "sshd-session"
-from = "message"
-pattern = "^(?P<auth_action>Accepted) (?P<auth_method>\w+) for (?P<username>\S+) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+)(?: ssh2)?(?:: (?P<key_type>\S+) (?P<key_fingerprint>\S+))?"
-pattern = "pam_unix\(sshd:session\): session (?P<session_action>opened|closed) for user (?P<username>\w+)"
-pattern = "^(?P<ssh_disconnect_recv>Received disconnect) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+):\d+: (?P<disconnect_reason>.+)$"
-pattern = "^(?P<ssh_disconnected>Disconnected) from user (?P<username>\S+) (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
-pattern = "^(?P<ssh_conn_closed>Connection closed) by (?:authenticating user (?P<username>\S+) )?(?P<src_ip>[\d.]+) port (?P<src_port>\d+) \[preauth\]"
-pattern = "^error: (?P<ssh_forward_fail>connect_to) (?P<dst_ip>[\d.]+) port (?P<dst_port>\d+): failed"
-pattern = "^error: (?P<ssh_child_reap>mm_reap): child terminated by signal (?P<signal>\d+)"
-pattern = "^(?P<ssh_logout_error>syslogin_perform_logout): logout\(\) returned an error"
-pattern = "^(?P<ssh_read_error>Read error) from remote host (?P<src_ip>[\d.]+) port (?P<src_port>\d+): (?P<error_reason>.+)$"
-
-[[extract.rule]]
-app_name = "sshd-session"
-auth_action = "Accepted"
-set = { event_type = "ssh_auth_success", severity = "info" }
-
-[[extract.rule]]
-app_name = "sshd-session"
-session_action = "opened"
-set = { event_type = "ssh_session_open", severity = "info" }
-
-[[extract.rule]]
-app_name = "sshd-session"
-session_action = "closed"
-set = { event_type = "ssh_session_close", severity = "info" }
-
-[[extract.rule]]
-app_name = "sshd-session"
-ssh_disconnect_recv = "Received disconnect"
-set = { event_type = "ssh_disconnect_received", severity = "info" }
-
-[[extract.rule]]
-app_name = "sshd-session"
-ssh_disconnected = "Disconnected"
-set = { event_type = "ssh_disconnect", severity = "info" }
-
-[[extract.rule]]
-app_name = "sshd-session"
-ssh_conn_closed = "Connection closed"
-set = { event_type = "ssh_connection_closed", severity = "info" }
-
-[[extract.rule]]
-app_name = "sshd-session"
-ssh_forward_fail = "connect_to"
-set = { event_type = "ssh_forward_failure", severity = "warning" }
-
-[[extract.rule]]
-app_name = "sshd-session"
-ssh_child_reap = "mm_reap"
-set = { event_type = "ssh_child_terminated", severity = "warning" }
-
-[[extract.rule]]
-app_name = "sshd-session"
-ssh_logout_error = "syslogin_perform_logout"
-set = { event_type = "ssh_logout_error", severity = "warning" }
-
-[[extract.rule]]
-app_name = "sshd-session"
-ssh_read_error = "Read error"
-set = { event_type = "ssh_read_error", severity = "warning" }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # filterlog  (pfSense firewall)
 #
 # The CSV payload is decoded by parsers/filterlog.rs (triggered via the
@@ -419,3 +347,94 @@ pattern = "^(?P<pfsense_page>/[^:]+): (?P<pfsense_change>Configuration Change): 
 app_name = "php-fpm"
 pfsense_change = "Configuration Change"
 set = { event_type = "pfsense_config_change" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# haproxy  (pfSense TLS reverse proxy)
+#
+# This deployment fronts internal services with a client-certificate-verifying
+# HAProxy. Most lines are connection/SSL events rather than HTTP access logs:
+#   <client_ip>:<port> [<ts>] <frontend>/<backend>:<bport>: SSL handshake failure[ (<detail>)]
+# The optional HTTP-access pattern below captures method/uri/status when HAProxy
+# is configured with an HTTP log format.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "haproxy"
+from = "message"
+# Connection/SSL log line — client address, frontend and backend target
+pattern = "^(?P<src_ip>[\d.]+):(?P<src_port>\d+) \[[^\]]+\] (?P<frontend>[^/ ]+)/(?P<backend>[^: ]+)"
+# Discriminator: TLS handshake rejected (no/invalid client cert, cipher, proto)
+pattern = "(?P<haproxy_tls>SSL handshake failure)"
+# Best-effort HTTP access fields, when present in the request capture
+pattern = "\"(?P<http_method>[A-Z]+) (?P<http_uri>\S+) HTTP/"
+
+[[extract.rule]]
+app_name = "haproxy"
+haproxy_tls = "SSL handshake failure"
+set = { event_type = "tls_handshake_failure", severity = "warning" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CRON  (cron job execution)
+#
+# Patterns handled:
+#   (<user>) CMD (<command>)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "CRON"
+from = "message"
+pattern = "^\((?P<cron_user>[^)]+)\) (?P<cron_action>CMD) \((?P<command>.+)\)\s*$"
+
+[[extract.rule]]
+app_name = "CRON"
+cron_action = "CMD"
+set = { event_type = "cron_exec" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# systemd-logind  (login session tracking)
+#
+# Patterns handled:
+#   New session '<id>' of user '<user>' with class '<class>' and type '<type>'.
+#   Session <id> logged out. ...
+#   Removed session <id>.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "systemd-logind"
+from = "message"
+pattern = "^New session '?(?P<session_id>[^' ]+)'? of user '?(?P<username>[^' ]+?)'? with class '?(?P<session_class>[^' ]+?)'? and type '?(?P<session_type>[^' .]+)"
+pattern = "^(?P<logind_new>New session)"
+pattern = "^Session (?P<session_id>\S+?)\.? (?P<logind_logout>logged out)"
+pattern = "^(?P<logind_removed>Removed session) (?P<session_id>[^. ]+)"
+
+[[extract.rule]]
+app_name = "systemd-logind"
+logind_new = "New session"
+set = { event_type = "session_new" }
+
+[[extract.rule]]
+app_name = "systemd-logind"
+logind_logout = "logged out"
+set = { event_type = "session_logout" }
+
+[[extract.rule]]
+app_name = "systemd-logind"
+logind_removed = "Removed session"
+set = { event_type = "session_removed" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# unix_chkpwd  (PAM helper — local password verification)
+#
+# Emitted by su/login/sudo/screensaver when a local password check fails:
+#   password check failed for user (<user>)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "unix_chkpwd"
+from = "message"
+pattern = "password check (?P<chkpwd_result>failed) for user \((?P<username>[^)]+)\)"
+
+[[extract.rule]]
+app_name = "unix_chkpwd"
+chkpwd_result = "failed"
+set = { event_type = "local_auth_failure", severity = "warning" }
