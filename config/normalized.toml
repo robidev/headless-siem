@@ -54,8 +54,9 @@ app_name = "sshd"
 from = "message"
 # Auth: Failed/Accepted password|publickey for [invalid user] <user> from <ip>
 pattern = "^(?P<auth_action>Failed|Accepted) (?P<auth_method>\w+) for (?:invalid user )?(?P<username>\S+) from (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
-# PAM session open/close
-pattern = "session (?P<session_action>opened|closed) for user (?P<username>\S+)"
+# PAM session open/close. Stop the username before the "(uid=NNNN)" suffix that
+# the "opened" variant appends ("...for user alice(uid=1000) by (uid=0)").
+pattern = "session (?P<session_action>opened|closed) for user (?P<username>[^\s(]+)"
 # Preauth connection close with authenticating user
 pattern = "Connection (?P<conn_action>closed) by (?:authenticating )?user (?P<username>\S+) (?P<src_ip>[\d.]+) port (?P<src_port>\d+)"
 # Standalone invalid-user probe (anchored so it doesn't match "for invalid user" in auth lines)

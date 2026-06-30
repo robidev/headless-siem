@@ -61,6 +61,10 @@ impl Processor {
         let outcome = parsers::parse(&inner, source_addr, &self.rules);
         let mut event = outcome.event;
 
+        if let Some(canon) = event.app_name.as_deref().and_then(canonical_app_name) {
+            event.app_name = Some(canon.to_string());
+        }
+
         // Fold envelope metadata into any fields the inner parse didn't supply.
         if let Some(e) = &env {
             if event.timestamp.is_none() {
@@ -426,6 +430,24 @@ fn strip_octet_count(s: &str) -> &[u8] {
     bytes
 }
 
+/// Canonicalize OpenSSH privilege-separation subprocess names back to `sshd`.
+///
+/// OpenSSH 9.8+ splits the daemon into `sshd` (listener), `sshd-session`
+/// (per-connection) and `sshd-auth` processes. The auth events we care about
+/// (Failed/Accepted password, pam session open/close) now log under
+/// `sshd-session`. Folding these to `sshd` keeps the source bucket and the
+/// `app_name = "sshd"` extract rules working across OpenSSH versions. The
+/// original program name remains visible in `_raw`.
+///
+/// Returns `Some(canonical)` only when a rewrite is needed, so callers can skip
+/// the allocation otherwise.
+fn canonical_app_name(app: &str) -> Option<&'static str> {
+    match app {
+        "sshd-session" | "sshd-auth" => Some("sshd"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +570,16 @@ mod tests {
         let json = flat_json("totally unstructured line", &[], None);
         assert!(json.contains(r#""_normalized":false"#));
         assert!(json.contains(r#""_raw":"totally unstructured line""#));
+    }
+
+    #[test]
+    fn openssh_subprocess_names_fold_to_sshd() {
+        assert_eq!(canonical_app_name("sshd-session"), Some("sshd"));
+        assert_eq!(canonical_app_name("sshd-auth"), Some("sshd"));
+        // Already-canonical and unrelated names are left untouched.
+        assert_eq!(canonical_app_name("sshd"), None);
+        assert_eq!(canonical_app_name("sudo"), None);
+        assert_eq!(canonical_app_name("sshd-foo"), None);
     }
 
     #[test]
