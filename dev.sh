@@ -74,6 +74,10 @@ PIPE_DIR="${SIEM_PIPE_DIR:-/tmp/headless-siem-dev}"
 PID_DIR="$PIPE_DIR/pids"
 LOG_DIR="$PIPE_DIR/logs"
 SYSLOG_PORT="${SIEM_PORT:-5514}"
+# ruled alert dedup window (seconds). 0 disables dedup so every matching event
+# yields an alert — required when exercising count-based correlation rules
+# (e.g. sustained-brute-force). See config/correlations.toml.
+DEDUP_WINDOW="${SIEM_DEDUP_WINDOW:-5}"
 
 NORM_PIPE="$PIPE_DIR/normalized-out.pipe"
 RULED_PIPE="$PIPE_DIR/ruled-out.pipe"
@@ -162,11 +166,12 @@ start_ruled() {
     "$BIN_DIR/ruled" \
         --rules "$CONFIG_DIR/rules" \
         --output "$DATA_DIR/alerts" \
+        --dedup-window "$DEDUP_WINDOW" \
         < "$NORM_PIPE" \
         > "$RULED_PIPE" \
         2>"$LOG_DIR/ruled.log" &
     save_pid ruled $!
-    info "ruled       pid=$!  (config/rules/*.yml → $DATA_DIR/alerts/)"
+    info "ruled       pid=$!  (config/rules/*.yml → $DATA_DIR/alerts/, dedup=${DEDUP_WINDOW}s)"
 }
 
 start_correlated() {
