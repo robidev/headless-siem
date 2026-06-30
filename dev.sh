@@ -171,13 +171,12 @@ start_ruled() {
 
 start_correlated() {
     "$BIN_DIR/correlated" \
-        --window 300 \
-        --threshold 5 \
+        --config "$CONFIG_DIR/correlations.toml" \
         --output "$DATA_DIR/correlated" \
         < "$RULED_PIPE" \
         2>"$LOG_DIR/correlated.log" &
     save_pid correlated $!
-    info "correlated  pid=$!  (5-min window → $DATA_DIR/correlated/)"
+    info "correlated  pid=$!  (config/correlations.toml → $DATA_DIR/correlated/)"
 }
 
 # Send one line as a UDP datagram to the running normalized instance.
