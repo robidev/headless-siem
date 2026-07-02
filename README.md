@@ -12,12 +12,20 @@ rsyslog ──omprog──→ normalized ──→ data/raw/YYYY/MM/DD/HH/MM/SS/
                        │              (timestamp, src_ip, dst_ip, event_type, severity, offset)
                        │
                   ruled (Rust)  ──→ data/alerts/YYYY/MM/DD/HH/alerts.jsonl
-                  (stdin→stdout,
-                   Sigma rules)
+                  (stdin→stdout,        │
+                   Sigma rules,     [[suppress]] rules (config/rules/suppress.toml, opt-in
+                   optional         via --suppress) drop known-false-positive alerts
+                   --suppress)      before they're written
                        │
-                  correlated (Rust) ──→ data/alerts/correlated/...
+                  correlated (Rust) ──→ data/alerts/correlated/YYYY/MM/DD/HH/correlated.jsonl
                   (stateful, reads
                    alert stream)
+
+siemctl (Rust) — standalone CLI, reads the filesystem above directly:
+  search   full DSL queries against the SQLite index (or raw files)
+  digest   anomaly-oriented shift-briefing summary over a time window
+  alerts   query + acknowledge ruled/correlated alerts (data/alerts/ack.jsonl)
+  status / stats / tail / retention / dry-run / validate
 ```
 
 ## Design Principles
@@ -34,9 +42,9 @@ rsyslog ──omprog──→ normalized ──→ data/raw/YYYY/MM/DD/HH/MM/SS/
 |--------|----------|------|
 | `normalized` | Rust | Deterministic-chain log normalizer (stdin/UDP/TCP 514). Never drops. |
 | `indexd` | Rust | inotify watcher. Builds SQLite indexes per time bucket. |
-| `ruled` | Rust | Sigma rule engine. stdin→stdout. Stream or batch. |
+| `ruled` | Rust | Sigma rule engine. stdin→stdout. Stream or batch. Optional `--suppress` for known-FP rules. |
 | `correlated` | Rust | Stateful correlation. Reads alert stream, emits compound alerts. |
-| `siemctl` | Rust | CLI: search, status, retention, dry-run parsing. |
+| `siemctl` | Rust | CLI: search, digest, alerts (query/ack), status, stats, tail, retention, dry-run, validate. |
 
 ## Quick Start
 
@@ -47,8 +55,16 @@ make
 # Test a parser against sample logs
 cat tests/fixtures/sshd.log | ./target/release/normalized --stdin --dry-run --source sshd
 
-# Run the full pipeline
-make run
+# Run the full pipeline as background processes (UDP :5514, no systemd needed)
+./dev.sh start
+./dev.sh status
+
+# Shift-briefing summary of the last 6 hours vs. the 6 hours before that
+./target/release/siemctl digest --data-dir data/
+
+# Query alerts, then acknowledge a known-benign one
+./target/release/siemctl alerts --data-dir data/ --query "GROUP BY rule_id,rule_title"
+./target/release/siemctl alerts ack 1007-haproxy-tls-probe --note "known CDN probe pattern"
 ```
 
 ## Data Layout
@@ -64,6 +80,10 @@ make run
 ├── index/              # Companion SQLite indexes (one per clock-hour)
 │   └── 2026-06-22-08.db
 └── alerts/             # Rule engine output
+    ├── ack.jsonl       # siemctl alerts ack watermarks (one line per ack)
+    ├── correlated/     # Stateful correlation output
+    │   └── 2026/06/22/08/
+    │       └── correlated.jsonl
     └── 2026/06/22/08/
         └── alerts.jsonl
 ```
@@ -75,23 +95,28 @@ make run
 - **5 binaries** — `normalized`, `indexd`, `ruled`, `correlated`, and `siemctl` (all Rust) compile and run.
 - **Log normalization** — Deterministic format chain (RFC 5424/3164, JSON, CEF, LEEF, logfmt, CSV, XML, YAML, plain) with config-driven second-pass and regex extraction. Outputs timestamped `.jsonl` + `.tsv` sidecar.
 - **Indexing** — `indexd` watches the raw directory via inotify and builds per-bucket SQLite indexes on the most-queried fields.
-- **Sigma rule engine** — `ruled` evaluates 5 Sigma rules (SSH brute-force, suspicious SSH, sudo execution, iptables deny, SSH login success) against the normalized stream and emits alerts. Alerts are deduplicated within a configurable window (`--dedup-window`, default 5s; `0` disables for batch replay / count-based correlation).
-- **Correlation** — `correlated` reads the alert stream and produces compound alerts from related events.
-- **CLI** — `siemctl` provides search, status, retention, and dry-run parsing.
-- **Integration tests** — 4 test scripts in `tests/integration/` exercise the full pipeline end-to-end.
-- **Documentation** — Guides and design docs in `docs/` covering parsers, detection rules, indexing verification, correlation testing, a user guide, and SOC improvement roadmap.
+- **Sigma rule engine** — `ruled` evaluates 10 Sigma rules (SSH brute-force, suspicious SSH, sudo execution, sudo privilege escalation, iptables deny, SSH login success, cron suspicious command, HAProxy TLS probe, firewall port scan, local auth failure) against the normalized stream and emits alerts. Alerts are deduplicated within a configurable window (`--dedup-window`, default 5s; `0` disables for batch replay / count-based correlation). Optional `--suppress config/rules/suppress.toml` drops known-false-positive alerts (e.g. CDN ranges tripping a network IDS rule) before they're written — inactive by default.
+- **Correlation** — `correlated` reads the alert stream and produces compound alerts from related events (4 correlation rules, e.g. port-scan detection from repeated firewall blocks).
+- **CLI** — `siemctl` provides:
+  - `search` — full DSL (field predicates, full-text, `GROUP BY`, `LIMIT`) against the SQLite index or raw files
+  - `digest` — anomaly-oriented shift-briefing: coverage/health, volume deltas vs. the preceding baseline, network trends, auth activity, alerts, and notable events, in text or JSON (the primary input for LLM-assisted triage)
+  - `alerts` — query ruled + correlated alerts with the same DSL as `search`; `alerts ack <rule_id>` acknowledges a rule's alerts up to now (a watermark, not a global switch)
+  - `status`, `stats`, `tail`, `retention` (also compacts stale ack state), `dry-run`, `validate`
+- **Integration tests** — 8 test scripts in `tests/integration/` (plus 16 detection-trigger scripts in `tests/detections/`) exercise the full pipeline end-to-end. 369 unit tests across the workspace.
+- **Documentation** — Guides and design docs in `docs/` covering parsers, detection rules (with a per-rule catalog in `docs/detections/`), indexing verification, correlation testing, a user guide, the digest/alerts/suppression design docs, and the SOC improvement roadmap.
 
 ### In Progress / Known Gaps
 
-- **Rule coverage** — Only 5 Sigma rules shipped; needs expansion for broader threat detection.
-- **Correlation engine** — Stateful correlation is functional but the rule set is minimal; more correlation scenarios needed.
+- **Rule coverage** — 10 Sigma rules and 4 correlation rules shipped; still narrow relative to the Sigma ecosystem, and there's no automated FP-tuning loop yet beyond manually authored `--suppress` rules and `alerts ack`.
+- **Automated triage loop** — `digest`, `alerts` (query + ack), and `ruled --suppress` are the three prerequisites `docs/design-llm-soc-analyst.md` names for a scheduled, tiered (Haiku → Sonnet → Sonnet+tools) LLM triage loop — all three are built, but the loop itself (a cron-scheduled agent reading the digest and escalating) is still just a design doc, not running anywhere.
+- **Alert state** — `siemctl alerts ack <rule_id>` is a single watermark per rule (hide up to now); there's no per-alert investigation state (closed/false-positive/etc.) beyond that.
 - **Processing-time windows** — `ruled` dedup and `correlated` windows key off wall-clock
   processing time, not event time. This is correct for a live tail. For batch/historical replay,
   run `ruled --dedup-window 0` so repeats aren't collapsed; event-time windowing is a planned
   follow-up.
 - **Performance tuning** — No benchmarking or throughput optimization yet.
 - **Packaging** — No system packages (`.deb`/`.rpm`) or container images; build-from-source only.
-- **Alerting** — No built-in notification channels (email, webhook, Slack); alerts are filesystem-only.
+- **Alerting** — No built-in push notification channels (email, webhook, Slack); alerts are filesystem/CLI-only (`siemctl alerts`, `siemctl digest`).
 - **Dashboard** — No web UI or visualization layer; `siemctl` is CLI-only.
 
-The project is functional and can ingest, normalize, index, detect, and correlate in a home-lab setting, but it is still evolving — expect rough edges and missing conveniences.
+The project is functional and can ingest, normalize, index, detect, correlate, summarize, and triage-query in a home-lab setting, but it is still evolving — expect rough edges and missing conveniences.
