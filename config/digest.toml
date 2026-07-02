@@ -1,0 +1,18 @@
+# Thresholds for `siemctl digest` — see docs/design-digest-command.md.
+# Every key here is optional; anything absent (or this whole file, if
+# missing) falls back to the documented default shown below.
+
+[volume]
+spike_threshold_pct = 50      # flag a source if its count changes >50% vs. baseline
+new_source_always_flag = true # flag a source with zero baseline events as "new"
+
+[coverage]
+unparsed_min_events = 50      # only flag unparsed (_normalized: false) sources with more than this many events
+
+[network]
+new_destination_always_flag = true # include destinations not seen in the baseline window
+wan_interface = "re1"               # interface name for the "inbound allowed" section
+top_blocked_limit = 20              # max rows in the "top blocked source IPs" table
+
+[alerts]
+concentration_threshold_pct = 80  # warn if one rule accounts for more than this % of alert volume

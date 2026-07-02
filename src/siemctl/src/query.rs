@@ -520,6 +520,78 @@ impl Condition {
             }
         }
     }
+
+    /// Evaluate this leaf directly against a JSON record — used by
+    /// `siemctl alerts`, which has no SQLite backing (alerts are flat
+    /// JSONL, not indexed). Field-comparison semantics mirror `to_sql`'s
+    /// SQL exactly: `Exact`/`NotExact` are case-sensitive (SQL `=`/`!=`);
+    /// `StartsWith`/`EndsWith`/`Contains` are case-insensitive (SQLite's
+    /// default `LIKE` behavior for ASCII, and the explicit `COLLATE
+    /// NOCASE` on `Contains`). A field that doesn't resolve on this record
+    /// behaves like SQL `NULL` — every comparison against it is false,
+    /// including `NotExact` (SQL `NULL != 'x'` is `NULL`, not `TRUE`).
+    fn eval_json(&self, record: &serde_json::Value) -> bool {
+        match self {
+            Condition::Field { field, value, mode } => {
+                let resolved = resolve_json_field(record, field).and_then(json_scalar_to_string);
+                match mode {
+                    MatchMode::Exact => resolved.as_deref() == Some(value.as_str()),
+                    MatchMode::NotExact => {
+                        resolved.as_deref().map(|r| r != value).unwrap_or(false)
+                    }
+                    MatchMode::StartsWith => resolved
+                        .map(|r| r.to_lowercase().starts_with(&value.to_lowercase()))
+                        .unwrap_or(false),
+                    MatchMode::EndsWith => resolved
+                        .map(|r| r.to_lowercase().ends_with(&value.to_lowercase()))
+                        .unwrap_or(false),
+                    MatchMode::Contains => resolved
+                        .map(|r| r.to_lowercase().contains(&value.to_lowercase()))
+                        .unwrap_or(false),
+                    MatchMode::Cidr => {
+                        resolved.map(|r| db::cidr_contains(value, &r).unwrap_or(false)).unwrap_or(false)
+                    }
+                    MatchMode::Any => resolved.map(|r| !r.is_empty()).unwrap_or(false),
+                }
+            }
+            // No `raw_file`/`byte_offset` backing exists for an alert record —
+            // the record itself is the payload, so "full text" search is a
+            // substring test over its whole serialized form. Case-sensitive,
+            // matching `raw_contains`'s `line.contains(&needle)` in db.rs.
+            Condition::Text { needle } => {
+                serde_json::to_string(record).map(|s| s.contains(needle.as_str())).unwrap_or(false)
+            }
+        }
+    }
+}
+
+/// Resolve `field` against an alert record, checking (in order): the
+/// top-level key, then `event.<field>` (a `ruled` alert's embedded event),
+/// then `sample_events[0].<field>` (a correlated alert's first sample).
+/// `null` resolves to "absent", same as a `NULL` SQL column. Returns the
+/// native JSON value (not stringified) so `siemctl alerts`' `SELECT`
+/// projection (in `alerts.rs`) can keep numeric/bool typing in its JSON
+/// output; `eval_json`'s WHERE-clause matching collapses it to a string via
+/// [`json_scalar_to_string`] below. Both must share this one traversal so a
+/// field resolves identically whether it's filtered on or projected.
+pub(crate) fn resolve_json_field<'a>(
+    record: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    record
+        .get(field)
+        .or_else(|| record.get("event").and_then(|e| e.get(field)))
+        .or_else(|| record.get("sample_events").and_then(|arr| arr.get(0)).and_then(|e| e.get(field)))
+        .filter(|v| !v.is_null())
+}
+
+pub(crate) fn json_scalar_to_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None, // array or object: not comparable as a scalar
+    }
 }
 
 impl Expr {
@@ -531,6 +603,17 @@ impl Expr {
             Expr::Or(a, b) => format!("({} OR {})", a.to_sql(params), b.to_sql(params)),
             Expr::Not(e) => format!("(NOT {})", e.to_sql(params)),
             Expr::Cond(c) => c.to_sql(params),
+        }
+    }
+
+    /// Evaluate this tree directly against a JSON record. See
+    /// [`Condition::eval_json`] for leaf semantics.
+    pub(crate) fn eval_json(&self, record: &serde_json::Value) -> bool {
+        match self {
+            Expr::And(a, b) => a.eval_json(record) && b.eval_json(record),
+            Expr::Or(a, b) => a.eval_json(record) || b.eval_json(record),
+            Expr::Not(e) => !e.eval_json(record),
+            Expr::Cond(c) => c.eval_json(record),
         }
     }
 }
@@ -609,7 +692,7 @@ pub(crate) fn index_buckets(data_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std
 /// True for the benign per-bucket errors we swallow: a bucket whose schema
 /// lacks a referenced column or the `events` table entirely (e.g. an older or
 /// differently-configured bucket). Any other error is surfaced.
-fn is_benign(msg: &str) -> bool {
+pub(crate) fn is_benign(msg: &str) -> bool {
     msg.contains("no such column") || msg.contains("no such table")
 }
 
@@ -1249,5 +1332,140 @@ mod tests {
         let (rc, out) = run(&tmp.path, "src_ip == 9.9.9.9");
         assert_eq!(rc, 1);
         assert!(out.is_empty());
+    }
+
+    // ── eval_json (siemctl alerts' JSON-backed evaluation path) ────────────
+
+    fn ruled_alert() -> serde_json::Value {
+        serde_json::json!({
+            "_ruled": true,
+            "rule_id": "1001-ssh-brute-force",
+            "rule_title": "SSH Brute Force Detection",
+            "level": "medium",
+            "timestamp": 1783026390,
+            "event": {
+                "_source_type": "sshd",
+                "event_type": "ssh_auth_failure",
+                "src_ip": "10.0.0.5",
+                "_raw": "Failed password for root from 10.0.0.5 port 22 ssh2"
+            }
+        })
+    }
+
+    fn correlated_alert() -> serde_json::Value {
+        serde_json::json!({
+            "_correlated": true,
+            "correlation_id": "cred-guess",
+            "correlation_title": "Credential Guessing",
+            "join_field": "src_ip",
+            "join_value": "10.0.0.5",
+            "chain_start": 100,
+            "chain_end": 200,
+            "step_counts": [3, 1],
+            "sample_events": [
+                { "src_ip": "10.0.0.5", "username": "root" }
+            ]
+        })
+    }
+
+    fn eval(dsl: &str, record: &serde_json::Value) -> bool {
+        parse(dsl).unwrap().expr.unwrap().eval_json(record)
+    }
+
+    #[test]
+    fn eval_json_top_level_field_on_ruled_alert() {
+        assert!(eval("rule_id == '1001-ssh-brute-force'", &ruled_alert()));
+        assert!(eval("level == medium", &ruled_alert()));
+        assert!(!eval("level == high", &ruled_alert()));
+    }
+
+    #[test]
+    fn eval_json_falls_back_to_embedded_event() {
+        // src_ip isn't top-level on a ruled alert — resolves via `event.src_ip`.
+        assert!(eval("src_ip == 10.0.0.5", &ruled_alert()));
+        assert!(eval("event_type == ssh_auth_failure", &ruled_alert()));
+    }
+
+    #[test]
+    fn eval_json_falls_back_to_first_sample_event_for_correlated() {
+        // No top-level or `event` object on a correlated alert — resolves
+        // via `sample_events[0].<field>`.
+        assert!(eval("src_ip == 10.0.0.5", &correlated_alert()));
+        assert!(eval("username == root", &correlated_alert()));
+    }
+
+    #[test]
+    fn eval_json_type_tag_distinguishes_alert_shapes() {
+        let mut ruled = ruled_alert();
+        ruled["type"] = serde_json::json!("ruled");
+        let mut correlated = correlated_alert();
+        correlated["type"] = serde_json::json!("correlated");
+
+        assert!(eval("type == correlated", &correlated));
+        assert!(!eval("type == correlated", &ruled));
+        assert!(eval("type == ruled", &ruled));
+    }
+
+    #[test]
+    fn eval_json_level_never_matches_correlated_alert() {
+        // Correlated alerts carry no `level` field at all (see module doc
+        // comment) — a level filter must simply not match, not error.
+        assert!(!eval("level == high", &correlated_alert()));
+        assert!(!eval("level == medium", &correlated_alert()));
+    }
+
+    #[test]
+    fn eval_json_not_exact_is_false_when_field_absent() {
+        // Mirrors SQL NULL semantics: NULL != 'x' is NULL (falsy), not true.
+        assert!(!eval("nonexistent_field != anything", &ruled_alert()));
+    }
+
+    #[test]
+    fn eval_json_any_requires_presence_and_non_empty() {
+        assert!(eval("any(rule_id)", &ruled_alert()));
+        assert!(!eval("any(nonexistent_field)", &ruled_alert()));
+    }
+
+    #[test]
+    fn eval_json_startswith_endswith_contains_are_case_insensitive() {
+        assert!(eval("startswith(rule_title,'SSH')", &ruled_alert()));
+        assert!(eval("startswith(rule_title,'ssh')", &ruled_alert())); // case-insensitive
+        assert!(eval("endswith(rule_title,'detection')", &ruled_alert()));
+        assert!(eval("contains(rule_title,'BRUTE')", &ruled_alert()));
+        assert!(!eval("contains(rule_title,'nonexistent')", &ruled_alert()));
+    }
+
+    #[test]
+    fn eval_json_cidr_match_on_resolved_field() {
+        assert!(eval("cidr_match(src_ip,'10.0.0.0/24')", &ruled_alert()));
+        assert!(!eval("cidr_match(src_ip,'192.168.0.0/24')", &ruled_alert()));
+    }
+
+    #[test]
+    fn eval_json_raw_contains_searches_whole_serialized_record() {
+        // No raw_file/byte_offset backing for alerts — Text conditions search
+        // the record's own serialized JSON instead.
+        assert!(eval("raw_contains('Failed password')", &ruled_alert()));
+        assert!(!eval("raw_contains('nonexistent phrase')", &ruled_alert()));
+    }
+
+    #[test]
+    fn eval_json_and_or_not_compose() {
+        let alert = ruled_alert();
+        assert!(eval("rule_id == '1001-ssh-brute-force' AND src_ip == 10.0.0.5", &alert));
+        assert!(!eval("rule_id == '1001-ssh-brute-force' AND src_ip == 9.9.9.9", &alert));
+        assert!(eval("level == high OR level == medium", &alert));
+        assert!(eval("NOT level == high", &alert));
+    }
+
+    #[test]
+    fn eval_json_select_projection_resolves_nested_fields_too() {
+        // resolve_json_field is shared between eval_json's WHERE matching and
+        // alerts.rs's SELECT projection — confirm it round-trips a nested
+        // field's native JSON type (not just a stringified comparison).
+        let alert = ruled_alert();
+        let v = resolve_json_field(&alert, "src_ip").unwrap();
+        assert_eq!(v, &serde_json::json!("10.0.0.5"));
+        assert_eq!(resolve_json_field(&alert, "nonexistent_field"), None);
     }
 }

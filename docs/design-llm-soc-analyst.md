@@ -164,3 +164,48 @@ Each run produces a structured log entry regardless of outcome:
 Triage verdicts (FP classifications, suppression recommendations) feed back
 into the alert suppression config over time, progressively reducing Tier 2
 load as known FPs are eliminated from the alert stream.
+
+---
+
+## Implementation Plan
+
+Scoped 2026-07-02. Full build sequence across all three prerequisites, each
+scoped in detail in its own doc — this section is the index, not a
+duplicate. Batches within a doc are strictly ordered; the three
+prerequisites themselves are independent of each other and can be built in
+any order (or in parallel, in separate sessions) since none of them import
+from the others.
+
+| # | Prerequisite | Detail | Batches | Model / effort | Status |
+|---|---|---|---|---|---|
+| 1 | Digest (`siemctl digest`) | `docs/design-digest-command.md` | 4 | Sonnet 5 — high, high, medium, medium | ✅ Done |
+| 2 | `siemctl alerts` query interface | `docs/roadmap-soc-improvements.md` Batches 1–2 | 2 | Sonnet 5 — high, medium | ✅ Done |
+| 3 | Alert state management | `docs/roadmap-soc-improvements.md` Batch 3 | 1 | Sonnet 5 — medium | ✅ Done |
+| 4 | Alert suppression rules | `docs/roadmap-soc-improvements.md` Batch 4 | 1 | Sonnet 5 — high | ✅ Done |
+
+All four prerequisites are complete as of 2026-07-02 — every batch in both
+detail docs is done. Every batch above was plain Rust feature work with a
+clear spec — none of it needed Opus-level judgment. The "high" ratings were
+for correctness risk (a subtle bug is invisible until real data hits it),
+not for reasoning difficulty.
+
+### What's still needed after all four land
+
+The four items above make the *inputs* to the analyst loop exist. They do
+not build the loop itself. Two more things are needed, and neither is a
+`siemctl`/Rust coding batch:
+
+1. **Runbook content.** Tier 2/3 need per-source-type runbook sections
+   (openvpn, filterlog, suricata, ...) documenting known-benign patterns and
+   escalation criteria, loaded selectively per the "Context provided per
+   run" table above. This is domain-knowledge authoring, not code —
+   *Sonnet 5, medium effort*, done interactively with whoever knows this
+   network best (a runbook written without that input is a guess).
+2. **The orchestration itself.** A scheduled Claude invocation running the
+   Tier 1 → 2 → 3 escalation on a cron cadence, reading the digest + network
+   topology + runbooks + (at Tier 3) `siemctl` as a tool. This is
+   operational setup — a prompt/skill plus a recurring scheduled agent — not
+   a feature to build inside this repo. It should be set up deliberately and
+   explicitly (recurring, billed automation is not something to stand up
+   silently) once items 1–4 are in place and there's real digest output to
+   design the Tier 1 prompt against.

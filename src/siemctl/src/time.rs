@@ -1,3 +1,4 @@
+use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use std::path::{Path, PathBuf};
 
 /// An hour-precision time bucket matching the data directory layout
@@ -43,11 +44,10 @@ impl HourBucket {
         Some(Self { year, month, day, hour })
     }
 
-    /// Returns `data_dir/raw/YYYY/MM/DD/HH`.
-    pub fn raw_dir(&self, data_dir: &Path) -> PathBuf {
-        data_dir
-            .join("raw")
-            .join(format!("{:04}", self.year))
+    /// Returns `base/YYYY/MM/DD/HH` — the same hour-bucket directory layout
+    /// used under `data/raw/`, `data/alerts/`, and `data/alerts/correlated/`.
+    pub fn dir_under(&self, base: &Path) -> PathBuf {
+        base.join(format!("{:04}", self.year))
             .join(format!("{:02}", self.month))
             .join(format!("{:02}", self.day))
             .join(format!("{:02}", self.hour))
@@ -112,6 +112,16 @@ mod tests {
     }
 
     #[test]
+    fn dir_under_builds_year_month_day_hour_path() {
+        let b = HourBucket { year: 2026, month: 6, day: 22, hour: 8 };
+        assert_eq!(b.dir_under(Path::new("data/alerts")), Path::new("data/alerts/2026/06/22/08"));
+        assert_eq!(
+            b.dir_under(Path::new("data/alerts/correlated")),
+            Path::new("data/alerts/correlated/2026/06/22/08")
+        );
+    }
+
+    #[test]
     fn from_filename_ordering_matches_parse() {
         let a = HourBucket::from_filename("2026-06-22-08.db").unwrap();
         let b = HourBucket::parse("2026-06-22T09").unwrap();
@@ -121,17 +131,309 @@ mod tests {
 
 /// Yield existing `raw/` hour directories in [`from`, `to`] (inclusive).
 pub fn hour_dirs_in_range(data_dir: &Path, from: HourBucket, to: HourBucket) -> Vec<PathBuf> {
+    dirs_in_range_under(&data_dir.join("raw"), from, to)
+}
+
+/// Yield existing hour-bucket directories `base/YYYY/MM/DD/HH` in
+/// `[from, to]` (inclusive) — the same walk as [`hour_dirs_in_range`], under
+/// an arbitrary base (e.g. `data_dir/alerts` or `data_dir/alerts/correlated`
+/// for `siemctl alerts`, not just `data_dir/raw`).
+pub fn dirs_in_range_under(base: &Path, from: HourBucket, to: HourBucket) -> Vec<PathBuf> {
     let mut result = Vec::new();
     let mut cur = from;
     for _ in 0..(366 * 24 + 1) {
         if cur > to {
             break;
         }
-        let dir = cur.raw_dir(data_dir);
+        let dir = cur.dir_under(base);
         if dir.is_dir() {
             result.push(dir);
         }
         cur = cur.advance();
     }
     result
+}
+
+// ── Digest window math ───────────────────────────────────────────────────────
+//
+// `siemctl digest` needs second-precision time arithmetic (window/baseline
+// boundaries that don't align to hour boundaries, N-minute sparkline
+// buckets), which the hand-rolled `HourBucket` above isn't built for. Rather
+// than extend `HourBucket`'s hand-rolled calendar math (`advance`,
+// `days_in_month`) to sub-hour precision, this section uses `chrono` — the
+// same crate `normalized` already relies on for exactly this kind of
+// concern, and everything under `data/raw/` is bucketed by UTC (see
+// `src/normalized/src/main.rs`/`output.rs`, both `chrono::Utc`), so `Utc` is
+// the correct clock to compute "now" against here too.
+//
+/// An analysis window: `[start, end)` in UTC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
+impl Window {
+    pub fn duration(&self) -> Duration {
+        self.end - self.start
+    }
+
+    /// The baseline window: the same duration immediately preceding `self`.
+    pub fn baseline(&self) -> Window {
+        let dur = self.duration();
+        Window { start: self.start - dur, end: self.start }
+    }
+}
+
+/// Parse a relative duration like `"10m"`, `"6h"`, `"24h"`, `"2d"`, `"45s"`.
+/// The unit is a single trailing letter (`s`/`m`/`h`/`d`); the magnitude must
+/// be a positive integer.
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    if s.len() < 2 {
+        return Err(format!("invalid duration '{s}' (expected e.g. '10m', '6h', '24h')"));
+    }
+    let (num_part, unit) = s.split_at(s.len() - 1);
+    let n: i64 = num_part
+        .parse()
+        .map_err(|_| format!("invalid duration '{s}' (expected e.g. '10m', '6h', '24h')"))?;
+    if n <= 0 {
+        return Err(format!("duration must be positive: '{s}'"));
+    }
+    match unit {
+        "s" => Ok(Duration::seconds(n)),
+        "m" => Ok(Duration::minutes(n)),
+        "h" => Ok(Duration::hours(n)),
+        "d" => Ok(Duration::days(n)),
+        _ => Err(format!("invalid duration unit in '{s}' (expected one of s/m/h/d)")),
+    }
+}
+
+/// Parse a `--window` value: either a relative duration ending at `now`
+/// (`"6h"`) or an explicit `start..end` range
+/// (`"2026-06-29T18..2026-06-29T20"`). Each side of an explicit range accepts
+/// `YYYY-MM-DDTHH[:MM[:SS]]`, with missing minute/second defaulting to 0.
+pub fn parse_window(s: &str, now: DateTime<Utc>) -> Result<Window, String> {
+    if let Some((lo, hi)) = s.split_once("..") {
+        let start = parse_explicit_timestamp(lo.trim())?;
+        let end = parse_explicit_timestamp(hi.trim())?;
+        if end <= start {
+            return Err(format!("--window range end must be after start: '{s}'"));
+        }
+        return Ok(Window { start, end });
+    }
+    let dur = parse_duration(s)?;
+    Ok(Window { start: now - dur, end: now })
+}
+
+/// Parse `YYYY-MM-DDTHH[:MM[:SS]]` into a UTC instant.
+fn parse_explicit_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
+    let invalid = || format!("invalid timestamp '{s}' (expected YYYY-MM-DDTHH[:MM[:SS]])");
+    let (date, time) = s.split_once('T').ok_or_else(invalid)?;
+
+    let mut d = date.split('-');
+    let year: i32 = d.next().and_then(|x| x.parse().ok()).ok_or_else(invalid)?;
+    let month: u32 = d.next().and_then(|x| x.parse().ok()).ok_or_else(invalid)?;
+    let day: u32 = d.next().and_then(|x| x.parse().ok()).ok_or_else(invalid)?;
+    if d.next().is_some() {
+        return Err(invalid());
+    }
+
+    let mut t = time.split(':');
+    let hour: u32 = t.next().and_then(|x| x.parse().ok()).ok_or_else(invalid)?;
+    let minute: u32 = match t.next() {
+        Some(m) => m.parse().map_err(|_| invalid())?,
+        None => 0,
+    };
+    let second: u32 = match t.next() {
+        Some(sec) => sec.parse().map_err(|_| invalid())?,
+        None => 0,
+    };
+    if t.next().is_some() {
+        return Err(invalid());
+    }
+
+    Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+        .single()
+        .ok_or_else(invalid)
+}
+
+/// The `raw_file` index column stores paths like
+/// `raw/YYYY/MM/DD/HH/MM/SS/<source>.jsonl` — zero-padded, so it sorts
+/// lexicographically in the same order as chronologically. This formats the
+/// prefix for a given instant, for use in `WHERE raw_file >= ? AND raw_file
+/// < ?` range predicates (no new indexed column needed for sub-hour
+/// precision).
+fn raw_file_bound(t: DateTime<Utc>) -> String {
+    format!(
+        "raw/{:04}/{:02}/{:02}/{:02}/{:02}/{:02}",
+        t.year(),
+        t.month(),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second()
+    )
+}
+
+/// The `[lo, hi)` `raw_file` string bounds for a window, for a
+/// `WHERE raw_file >= ? AND raw_file < ?` predicate.
+pub fn raw_file_range(win: &Window) -> (String, String) {
+    (raw_file_bound(win.start), raw_file_bound(win.end))
+}
+
+/// Recover the exact UTC event time from a `raw_file` column value
+/// (`raw/YYYY/MM/DD/HH/MM/SS/<source>.jsonl`). Returns `None` for anything
+/// that doesn't match that shape (e.g. a pre-migration row with no
+/// `raw_file`).
+pub fn parse_raw_file_time(raw_file: &str) -> Option<DateTime<Utc>> {
+    let rest = raw_file.strip_prefix("raw/")?;
+    let mut p = rest.split('/');
+    let year: i32 = p.next()?.parse().ok()?;
+    let month: u32 = p.next()?.parse().ok()?;
+    let day: u32 = p.next()?.parse().ok()?;
+    let hour: u32 = p.next()?.parse().ok()?;
+    let minute: u32 = p.next()?.parse().ok()?;
+    let second: u32 = p.next()?.parse().ok()?;
+    Utc.with_ymd_and_hms(year, month, day, hour, minute, second).single()
+}
+
+#[cfg(test)]
+mod digest_window_tests {
+    use super::*;
+
+    fn ymdhms(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, mo, d, h, mi, s).single().unwrap()
+    }
+
+    // ── parse_duration ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_duration_units() {
+        assert_eq!(parse_duration("45s").unwrap(), Duration::seconds(45));
+        assert_eq!(parse_duration("10m").unwrap(), Duration::minutes(10));
+        assert_eq!(parse_duration("6h").unwrap(), Duration::hours(6));
+        assert_eq!(parse_duration("24h").unwrap(), Duration::hours(24));
+        assert_eq!(parse_duration("2d").unwrap(), Duration::days(2));
+    }
+
+    #[test]
+    fn parse_duration_rejects_bad_input() {
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("h").is_err());
+        assert!(parse_duration("10").is_err());
+        assert!(parse_duration("10x").is_err());
+        assert!(parse_duration("0h").is_err());
+        assert!(parse_duration("-5h").is_err());
+        assert!(parse_duration("abch").is_err());
+    }
+
+    // ── parse_window ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_window_relative_ends_at_now() {
+        let now = ymdhms(2026, 6, 29, 20, 0, 0);
+        let w = parse_window("6h", now).unwrap();
+        assert_eq!(w.end, now);
+        assert_eq!(w.start, ymdhms(2026, 6, 29, 14, 0, 0));
+    }
+
+    #[test]
+    fn parse_window_relative_crosses_month_boundary() {
+        let now = ymdhms(2026, 3, 1, 2, 0, 0);
+        let w = parse_window("6h", now).unwrap();
+        assert_eq!(w.start, ymdhms(2026, 2, 28, 20, 0, 0));
+    }
+
+    #[test]
+    fn parse_window_relative_crosses_year_boundary() {
+        let now = ymdhms(2027, 1, 1, 2, 0, 0);
+        let w = parse_window("6h", now).unwrap();
+        assert_eq!(w.start, ymdhms(2026, 12, 31, 20, 0, 0));
+    }
+
+    #[test]
+    fn parse_window_explicit_range_hour_precision() {
+        let now = ymdhms(2026, 6, 29, 23, 0, 0);
+        let w = parse_window("2026-06-29T18..2026-06-29T20", now).unwrap();
+        assert_eq!(w.start, ymdhms(2026, 6, 29, 18, 0, 0));
+        assert_eq!(w.end, ymdhms(2026, 6, 29, 20, 0, 0));
+    }
+
+    #[test]
+    fn parse_window_explicit_range_minute_second_precision() {
+        let now = ymdhms(2026, 6, 29, 23, 0, 0);
+        let w = parse_window("2026-06-29T18:05:30..2026-06-29T18:10:00", now).unwrap();
+        assert_eq!(w.start, ymdhms(2026, 6, 29, 18, 5, 30));
+        assert_eq!(w.end, ymdhms(2026, 6, 29, 18, 10, 0));
+    }
+
+    #[test]
+    fn parse_window_rejects_backwards_range() {
+        let now = ymdhms(2026, 6, 29, 23, 0, 0);
+        assert!(parse_window("2026-06-29T20..2026-06-29T18", now).is_err());
+        assert!(parse_window("2026-06-29T18..2026-06-29T18", now).is_err());
+    }
+
+    #[test]
+    fn parse_window_rejects_malformed_range() {
+        let now = ymdhms(2026, 6, 29, 23, 0, 0);
+        assert!(parse_window("2026-06-29T18..not-a-time", now).is_err());
+        assert!(parse_window("2026-13-01T18..2026-06-29T20", now).is_err()); // bad month
+    }
+
+    // ── Window::baseline ─────────────────────────────────────────────────
+
+    #[test]
+    fn baseline_is_same_duration_immediately_before() {
+        let w = Window { start: ymdhms(2026, 6, 29, 14, 0, 0), end: ymdhms(2026, 6, 29, 20, 0, 0) };
+        let b = w.baseline();
+        assert_eq!(b.start, ymdhms(2026, 6, 29, 8, 0, 0));
+        assert_eq!(b.end, ymdhms(2026, 6, 29, 14, 0, 0));
+        assert_eq!(b.duration(), w.duration());
+    }
+
+    #[test]
+    fn baseline_crosses_month_boundary() {
+        let w = Window { start: ymdhms(2026, 3, 1, 0, 0, 0), end: ymdhms(2026, 3, 1, 6, 0, 0) };
+        let b = w.baseline();
+        assert_eq!(b.start, ymdhms(2026, 2, 28, 18, 0, 0));
+        assert_eq!(b.end, ymdhms(2026, 3, 1, 0, 0, 0));
+    }
+
+    // ── raw_file_range / parse_raw_file_time ────────────────────────────
+
+    #[test]
+    fn raw_file_range_formats_zero_padded_bounds() {
+        let w = Window { start: ymdhms(2026, 6, 22, 8, 5, 3), end: ymdhms(2026, 6, 22, 9, 0, 0) };
+        let (lo, hi) = raw_file_range(&w);
+        assert_eq!(lo, "raw/2026/06/22/08/05/03");
+        assert_eq!(hi, "raw/2026/06/22/09/00/00");
+    }
+
+    #[test]
+    fn raw_file_range_bounds_sort_correctly_against_real_paths() {
+        let w = Window { start: ymdhms(2026, 6, 22, 8, 55, 3), end: ymdhms(2026, 6, 22, 8, 55, 7) };
+        let (lo, hi) = raw_file_range(&w);
+        // A file at exactly `start` is included; one at exactly `end` is not.
+        assert!("raw/2026/06/22/08/55/03/sshd.jsonl" >= lo.as_str());
+        assert!("raw/2026/06/22/08/55/07/sshd.jsonl" >= hi.as_str());
+        assert!("raw/2026/06/22/08/55/06/sshd.jsonl" < hi.as_str());
+        assert!("raw/2026/06/22/08/55/02/sshd.jsonl" < lo.as_str());
+    }
+
+    #[test]
+    fn parse_raw_file_time_round_trips() {
+        let t = ymdhms(2026, 6, 22, 8, 55, 3);
+        let raw_file = format!("{}/sshd.jsonl", raw_file_bound(t));
+        assert_eq!(parse_raw_file_time(&raw_file), Some(t));
+    }
+
+    #[test]
+    fn parse_raw_file_time_rejects_malformed() {
+        assert_eq!(parse_raw_file_time(""), None);
+        assert_eq!(parse_raw_file_time("not-a-raw-file"), None);
+        assert_eq!(parse_raw_file_time("raw/2026/06/22/08"), None); // missing MM/SS
+        assert_eq!(parse_raw_file_time("raw/2026/13/22/08/05/03/x.jsonl"), None); // bad month, but chrono itself rejects it via .single()
+    }
 }

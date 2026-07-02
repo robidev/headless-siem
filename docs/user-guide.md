@@ -220,6 +220,29 @@ set      = { }                # (set per-event-type in pass-2 rules)
 
 See [normalized-usage.md](normalized-usage.md) for the full reference on conditions, `set`, multi-pass patterns, and the second-pass (CEF/JSON-inside-syslog) mechanism.
 
+### digest.toml
+
+Located at `config/digest.toml`. Thresholds for `siemctl digest`'s anomaly
+flags (see [Digest](#digest) below). Every key is optional — anything
+absent, or the whole file if missing, falls back to the defaults shown:
+
+```toml
+[volume]
+spike_threshold_pct = 50      # flag a source if its count changes >50% vs. baseline
+new_source_always_flag = true # flag a source with zero baseline events as "new"
+
+[coverage]
+unparsed_min_events = 50      # only flag unparsed (_normalized: false) sources with more events than this
+
+[network]
+new_destination_always_flag = true # include destinations not seen in the baseline window
+wan_interface = "re1"               # interface name for the "inbound allowed" section
+top_blocked_limit = 20              # max rows in the "top blocked source IPs" table
+
+[alerts]
+concentration_threshold_pct = 80  # warn if one rule accounts for more than this % of alert volume
+```
+
 ### Sigma Rule Writing
 
 Rules live under `config/rules/` as YAML files. The engine supports a subset of the Sigma specification.
@@ -400,6 +423,95 @@ grep -r "10.0.0.5" data/raw/
 rg "Failed password" data/raw/
 jq '.src_ip' data/raw/2026/06/22/08/**/*.jsonl
 ```
+
+### Digest
+
+`siemctl digest` answers "what's different right now?" in one command,
+instead of a series of `search`/`stats` queries you'd have to think up and
+compare by hand. It computes six sections — coverage/health, volume deltas,
+network trends, auth activity, alerts, and notable low-volume events — each
+compared against the same duration immediately preceding the window. It's
+the primary input for LLM-assisted triage (`--format json`) as well as a
+human shift-briefing summary (`--format text`, the default). See
+[design-digest-command.md](design-digest-command.md) for the full spec and
+`digest.toml` above for tuning its anomaly thresholds.
+
+```bash
+# Default: last 6 hours vs. the 6 hours before that, text output
+siemctl digest --data-dir data/
+
+# A specific window instead of "ending now"
+siemctl digest --data-dir data/ --window "2026-06-29T14..2026-06-29T20"
+
+# Coarser trending buckets for a longer window
+siemctl digest --data-dir data/ --window 24h --interval 1h
+
+# Structured output for scripting / LLM tool calls
+siemctl digest --data-dir data/ --format json | jq '.volume[] | select(.flag != null)'
+```
+
+Read the coverage section first — it's the section that tells you whether
+the rest of the digest can be trusted (a source gone silent or a lagging
+index means every other section needs that caveat in mind). Rows flagged
+`←` in the volume section (or a non-null `flag` in JSON) are the only ones
+that need a second look; everything else is shown for completeness.
+
+### Alerts
+
+`siemctl alerts` queries `ruled` alerts (`data/alerts/`) and correlated
+alerts (`data/alerts/correlated/`) — neither is indexed in SQLite (alerts
+are flat JSONL and low-volume), so `--query` uses the same DSL grammar as
+`search` but is evaluated directly against each record instead of compiled
+to SQL. `WHERE` and `SELECT` both resolve a field the same way regardless
+of which alert shape it comes from: the record's own top-level keys, then
+its embedded event (a `ruled` alert's `event` object), then its first
+sample event (a correlated alert's `sample_events[0]`) — so `src_ip`,
+`event_type`, etc. work without needing to know which shape you're
+querying. Every record carries a synthetic `type` field (`"ruled"` or
+`"correlated"`); correlated alerts carry no `level` at all (no severity is
+computed for them today).
+
+```bash
+# All high/critical alerts in the last hour
+siemctl alerts --data-dir data/ --after 2026-06-29T19 --query "level == high OR level == critical"
+
+# A specific IP, resolved through the embedded event either way
+siemctl alerts --data-dir data/ --query "SELECT rule_title,timestamp WHERE src_ip == 10.10.50.11"
+
+# Alert volume by rule
+siemctl alerts --data-dir data/ --query "GROUP BY rule_id,rule_title LIMIT 20"
+
+# Correlated alerts only — --correlated is shorthand for adding
+# "type == correlated" to --query yourself
+siemctl alerts --data-dir data/ --correlated
+```
+
+With no `--query`, the default is every alert in range as a whole JSON
+record per line — same convention as `search`'s own default (no curated
+subset, no special-cased `SELECT _raw`; a literal `_raw` field resolves
+normally to the embedded event's own `_raw`, i.e. the original raw log
+line).
+
+**Acknowledging alerts.** `siemctl alerts ack <rule_id>` marks every alert
+for that rule up to right now as reviewed — a watermark, not a global
+switch. `siemctl alerts`'s default output then hides alerts for that
+rule_id at or before the ack; a *new* alert for the same rule firing later
+still shows up normally next time (correlated alerts have no `rule_id` and
+are never affected by acks).
+
+```bash
+# Reviewed this rule's current alert backlog — stop showing it by default
+siemctl alerts ack 1007-haproxy-tls-probe --note "known CDN probe pattern"
+
+# See everything again, including what's been acked
+siemctl alerts --data-dir data/ --all
+```
+
+Ack state lives in one append-only `data/alerts/ack.jsonl`. Because that
+file is touched on every ack, it never ages out on its own via file mtime
+the way `alerts.jsonl`/`correlated.jsonl` buckets do — `siemctl retention`
+compacts it too (drops ack lines older than `--days`), so the same
+retention cron job you already run keeps this tidy without extra setup.
 
 ### Live Tail
 

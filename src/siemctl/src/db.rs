@@ -204,6 +204,20 @@ pub(crate) fn print_rows<W: Write>(
 /// `n_fields` is the number of leading group columns (the trailing column is the
 /// `COUNT(*)`). The group fields are interpolated into `sql` by the compiler and
 /// must already be validated as safe SQL identifiers.
+/// Render a SQLite column value as a plain string: `NULL` → `""`, numbers via
+/// their `Display` impl, text as-is (lossily, for stray non-UTF8 bytes),
+/// blobs → `""` (none of siemctl's columns are ever blobs).
+pub(crate) fn value_ref_to_string(v: rusqlite::types::ValueRef) -> String {
+    use rusqlite::types::ValueRef;
+    match v {
+        ValueRef::Null => String::new(),
+        ValueRef::Integer(n) => n.to_string(),
+        ValueRef::Real(n) => n.to_string(),
+        ValueRef::Text(b) => String::from_utf8_lossy(b).into_owned(),
+        ValueRef::Blob(_) => String::new(),
+    }
+}
+
 pub fn fold_group_sql(
     conn: &Connection,
     sql: &str,
@@ -211,8 +225,6 @@ pub fn fold_group_sql(
     n_fields: usize,
     acc: &mut BTreeMap<Vec<String>, u64>,
 ) -> rusqlite::Result<()> {
-    use rusqlite::types::ValueRef;
-
     let mut stmt = conn.prepare(sql)?;
     let n = n_fields;
     let param_refs: Vec<&dyn rusqlite::ToSql> =
@@ -222,14 +234,7 @@ pub fn fold_group_sql(
     while let Some(row) = rows.next()? {
         let mut key = Vec::with_capacity(n);
         for i in 0..n {
-            let part = match row.get_ref(i)? {
-                ValueRef::Null => String::new(),
-                ValueRef::Integer(v) => v.to_string(),
-                ValueRef::Real(v) => v.to_string(),
-                ValueRef::Text(b) => String::from_utf8_lossy(b).into_owned(),
-                ValueRef::Blob(_) => String::new(),
-            };
-            key.push(part);
+            key.push(value_ref_to_string(row.get_ref(i)?));
         }
         let count: i64 = row.get(n)?;
         *acc.entry(key).or_insert(0) += count as u64;

@@ -63,6 +63,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -426,11 +427,13 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "ruled"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "serde_yaml",
  "signal-hook",
  "tempfile",
+ "toml",
  "walkdir",
 ]
 
@@ -557,8 +560,11 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "siemctl"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "rusqlite",
+ "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

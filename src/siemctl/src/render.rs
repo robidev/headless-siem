@@ -204,7 +204,7 @@ fn parse_flat_object(line: &str) -> Option<Record> {
     Some(obj.iter().map(|(k, v)| (k.clone(), json_to_val(v))).collect())
 }
 
-fn json_to_val(v: &serde_json::Value) -> Val {
+pub(crate) fn json_to_val(v: &serde_json::Value) -> Val {
     use serde_json::Value;
     match v {
         Value::Null => Val::Null,

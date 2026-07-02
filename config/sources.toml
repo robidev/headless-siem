@@ -47,7 +47,7 @@ index_fields = ["admin_user", "src_ip", "event_type", "pfsense_page"]
 index_fields = ["src_ip", "src_port", "dst_ip", "username", "event_type", "auth_method", "auth_action"]
 
 [source.sudo]
-index_fields = ["username", "event_type"]
+index_fields = ["username", "event_type", "target_user", "command", "tty"]
 
 [source.iptables]
 index_fields = ["src_ip", "dst_ip", "dst_port", "event_type"]

@@ -1,4 +1,9 @@
+mod alerts;
 mod db;
+mod digest;
+mod digest_config;
+mod digest_query;
+mod digest_render;
 mod normconfig;
 mod query;
 mod render;
@@ -35,6 +40,8 @@ fn main() {
         "status" => run(cmd_status(rest)),
         "stats" => run(cmd_stats(rest)),
         "search" => run(cmd_search(rest, &valid_fields)),
+        "alerts" => run(cmd_alerts(rest)),
+        "digest" => run(cmd_digest(rest)),
         "tail" => run(cmd_tail(rest)),
         "retention" => run(cmd_retention(rest)),
         "dry-run" => run(cmd_dryrun(rest)),
@@ -68,6 +75,8 @@ fn print_top_help() {
          \x20 status      Show data directory size, file counts, index coverage\n\
          \x20 stats       Event counts per source, field coverage (use --source for breakdown)\n\
          \x20 search      Search indexed buckets or raw JSONL (field, full-text, time-range)\n\
+         \x20 alerts      Query ruled/correlated alerts under data/alerts/\n\
+         \x20 digest      Anomaly-oriented shift-briefing summary over a time window\n\
          \x20 tail        Stream live events from raw JSONL files\n\
          \x20 retention   Delete raw data older than N days\n\
          \x20 dry-run     Test normalization + rule matching against a fixture file\n\
@@ -120,7 +129,7 @@ fn find_binary(name: &str) -> PathBuf {
 }
 
 /// Walk `dir` recursively, calling `f` on every `.jsonl` file.
-fn walk_jsonl(dir: &Path, f: &mut impl FnMut(&Path)) {
+pub(crate) fn walk_jsonl(dir: &Path, f: &mut impl FnMut(&Path)) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
@@ -421,7 +430,7 @@ fn print_verbose_status(data_dir: &Path) {
 }
 
 /// Format a u64 with comma thousands separators: 1234567 → "1,234,567".
-fn fmt_n(n: u64) -> String {
+pub(crate) fn fmt_n(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().rev().enumerate() {
@@ -804,6 +813,177 @@ fn print_search_help() {
     );
 }
 
+// ── cmd: alerts ──────────────────────────────────────────────────────────────
+
+fn cmd_alerts(args: &[String]) -> Result<i32> {
+    if args.first().map(String::as_str) == Some("ack") {
+        return cmd_alerts_ack(&args[1..]);
+    }
+
+    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut dsl: Option<String> = None;
+    let mut after: Option<time::HourBucket> = None;
+    let mut before: Option<time::HourBucket> = None;
+    let mut format = render::Format::Json;
+    let mut correlated_only = false;
+    let mut show_all = false;
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
+            "--query" | "-q" => dsl = Some(next_arg(&mut it, arg)?.to_string()),
+            "--correlated" => correlated_only = true,
+            "--all" => show_all = true,
+            "--format" => format = render::Format::parse(next_arg(&mut it, arg)?)?,
+            "--after" | "-a" => {
+                let s = next_arg(&mut it, arg)?;
+                after = Some(
+                    time::HourBucket::parse(s)
+                        .ok_or_else(|| format!("invalid --after '{s}' (YYYY-MM-DDTHH)"))?,
+                );
+            }
+            "--before" | "-b" => {
+                let s = next_arg(&mut it, arg)?;
+                before = Some(
+                    time::HourBucket::parse(s)
+                        .ok_or_else(|| format!("invalid --before '{s}' (YYYY-MM-DDTHH)"))?,
+                );
+            }
+            "--help" | "-h" => {
+                print_alerts_help();
+                return Ok(0);
+            }
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    if !data_dir.is_dir() {
+        return Err(format!("data directory not found: {}", data_dir.display()).into());
+    }
+
+    // Alert fields aren't a fixed indexed schema (unlike `search`'s columns) —
+    // an empty `valid` set makes `Query::parse` accept any field name.
+    let q = query::Query::parse(dsl.as_deref().unwrap_or(""), &HashSet::new())
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("invalid --query: {e}").into() })?;
+
+    let mut records = alerts::load_alerts(&data_dir, after, before);
+    if correlated_only {
+        records.retain(|r| r.get("type").and_then(|v| v.as_str()) == Some("correlated"));
+    }
+    if !show_all {
+        let watermarks = alerts::load_ack_watermarks(&data_dir);
+        alerts::filter_acked(&mut records, &watermarks);
+    }
+
+    let mut renderer =
+        render::Renderer::new(format, q.select.clone(), io::BufWriter::new(io::stdout()), q.limit);
+    let rc = alerts::run_query(&records, &q, &mut renderer);
+    renderer.flush().ok();
+    rc
+}
+
+fn cmd_alerts_ack(args: &[String]) -> Result<i32> {
+    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut note: Option<String> = None;
+    let mut rule_id: Option<String> = None;
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
+            "--note" => note = Some(next_arg(&mut it, arg)?.to_string()),
+            "--help" | "-h" => {
+                println!(
+                    "Usage: siemctl alerts ack <rule_id> [--note \"text\"] [--data-dir DIR]\n\n\
+                     Marks every alert for <rule_id> up to right now as acknowledged — a\n\
+                     watermark, not a global switch. `siemctl alerts`' default output hides\n\
+                     alerts for <rule_id> at or before this moment; a NEW alert for the same\n\
+                     rule_id firing afterward still shows up normally next time. `--all`\n\
+                     bypasses this filter entirely (acked or not).\n\n\
+                     Options:\n\
+                     \x20 --note \"text\"    Optional free-text note, stored alongside the ack\n\
+                     \x20 --data-dir DIR   Data directory (default: ./data)\n\n\
+                     Example:\n\
+                     \x20 siemctl alerts ack 1007-haproxy-tls-probe --note \"known CDN probe pattern\""
+                );
+                return Ok(0);
+            }
+            other if !other.starts_with('-') && rule_id.is_none() => rule_id = Some(other.to_string()),
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    let rule_id = rule_id.ok_or("siemctl alerts ack: <rule_id> is required")?;
+    if !data_dir.is_dir() {
+        return Err(format!("data directory not found: {}", data_dir.display()).into());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    alerts::ack(&data_dir, &rule_id, now, note.as_deref())?;
+    println!(
+        "acked '{rule_id}' up to now — matching alerts up to this point are hidden by default \
+         (siemctl alerts --all shows them); a new alert for this rule will still show up."
+    );
+    Ok(0)
+}
+
+fn print_alerts_help() {
+    println!(
+        "Usage: siemctl alerts [--query \"<dsl>\"] [OPTIONS]\n\
+         \x20      siemctl alerts ack <rule_id> [--note \"text\"]\n\
+         \n\
+         Queries ruled alerts (data/alerts/) and correlated alerts\n\
+         (data/alerts/correlated/) — both are flat JSONL, not indexed, so\n\
+         --query uses the same DSL as `search` but is evaluated directly\n\
+         against each record rather than compiled to SQL. WHERE and SELECT\n\
+         both resolve fields via: the alert's own top-level keys, then its\n\
+         embedded event (a ruled alert's `event` object), then its first\n\
+         sample event (a correlated alert's `sample_events[0]`) — so\n\
+         `src_ip`, `event_type`, etc. work the same way regardless of which\n\
+         alert shape they come from.\n\
+         \n\
+         Every record carries a synthetic `type` field (\"ruled\" or\n\
+         \"correlated\") so a query can distinguish them; correlated alerts\n\
+         have no `level` field at all (they carry no severity).\n\
+         \n\
+         `siemctl alerts ack <rule_id>` marks alerts for that rule_id up to\n\
+         right now as acknowledged (a watermark, not a global switch — a new\n\
+         alert for the same rule firing later still shows up). Acked alerts\n\
+         are hidden from the default view; --all shows everything regardless.\n\
+         Run 'siemctl alerts ack --help' for details.\n\
+         \n\
+         Options:\n\
+         \x20 --query \"<dsl>\"        Predicate / SELECT / GROUP BY / LIMIT expression\n\
+         \x20 --correlated           Only correlated alerts (equivalent to adding\n\
+         \x20                        \"type == correlated\" to --query yourself)\n\
+         \x20 --all                  Include acked alerts too (default: hidden)\n\
+         \x20 --after  YYYY-MM-DDTHH Start of time range (bucket pruning)\n\
+         \x20 --before YYYY-MM-DDTHH End of time range (bucket pruning)\n\
+         \x20 --format FMT           Output format: json (default), tsv, tsv-noheader\n\
+         \x20 --data-dir DIR         Data directory (default: ./data)\n\
+         \x20 --help                 Show this help\n\
+         \n\
+         Examples:\n\
+         \x20 siemctl alerts --query \"level == high OR level == critical\" --after 2026-06-29T19\n\
+         \x20 siemctl alerts --query \"SELECT rule_title,timestamp WHERE src_ip == 10.10.50.11\"\n\
+         \x20 siemctl alerts --query \"GROUP BY rule_id,rule_title LIMIT 20\"\n\
+         \x20 siemctl alerts --correlated --after 2026-06-29T00\n\
+         \x20 siemctl alerts --query \"type == correlated GROUP BY correlation_id\"\n\
+         \x20 siemctl alerts ack 1007-haproxy-tls-probe --note \"known CDN probe pattern\"\n\
+         \x20 siemctl alerts --all --query \"GROUP BY rule_id\""
+    );
+}
+
 /// True if `s` is a safe bare SQL identifier (letters/digits/underscore, not
 /// starting with a digit). Used to guard field/group identifiers that are
 /// interpolated into the compiled SQL rather than bound as parameters.
@@ -865,6 +1045,70 @@ fn search_dump<W: io::Write>(
         for line in BufReader::new(f).lines().map_while(|r| r.ok()) {
             let _ = renderer.emit_raw_line(&line);
             if renderer.is_done() { break 'outer; }
+        }
+    }
+    Ok(0)
+}
+
+// ── cmd: digest ──────────────────────────────────────────────────────────────
+
+fn cmd_digest(args: &[String]) -> Result<i32> {
+    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut window_arg = "6h".to_string();
+    let mut interval_arg = "10m".to_string();
+    let mut format = "text".to_string();
+
+    let mut it = args.iter().map(String::as_str);
+    while let Some(arg) = it.next() {
+        match arg {
+            "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
+            "--window" => window_arg = next_arg(&mut it, arg)?.to_string(),
+            "--interval" => interval_arg = next_arg(&mut it, arg)?.to_string(),
+            "--format" => format = next_arg(&mut it, arg)?.to_string(),
+            "--help" | "-h" => {
+                println!(
+                    "Usage: siemctl digest [--window DURATION] [--interval DURATION] \
+                     [--data-dir DIR] [--format text|json]\n\n\
+                     Anomaly-oriented shift-briefing summary: coverage/health, volume\n\
+                     deltas vs. the immediately-preceding baseline, network trends,\n\
+                     auth activity, alerts, and notable low-volume events.\n\n\
+                     Options:\n\
+                     \x20 --window   DURATION  Analysis period ending now (default: 6h)\n\
+                     \x20                      Examples: 1h, 6h, 24h, 2026-06-29T18..2026-06-29T20\n\
+                     \x20 --interval DURATION  Trending bucket size (default: 10m)\n\
+                     \x20 --data-dir DIR       Data directory (default: ./data)\n\
+                     \x20 --format   FMT       text (default) | json\n\n\
+                     Thresholds (spike %, unparsed-event minimum, ...) are read from\n\
+                     config/digest.toml if present; see that file for defaults."
+                );
+                return Ok(0);
+            }
+            other => {
+                eprintln!("siemctl: unknown flag: {other}");
+                return Ok(1);
+            }
+        }
+    }
+
+    let now = chrono::Utc::now();
+    let win = time::parse_window(&window_arg, now)
+        .map_err(|e| format!("invalid --window: {e}"))?;
+    let interval = time::parse_duration(&interval_arg)
+        .map_err(|e| format!("invalid --interval: {e}"))?;
+
+    let cfg = digest_config::load_or_default();
+    let report = digest::build_report(&data_dir, &win, &cfg, interval)?;
+
+    match format.as_str() {
+        "text" => {
+            print!("{}", digest_render::render_text(&report, &cfg, interval));
+        }
+        "json" => {
+            println!("{}", digest_render::render_json(&report)?);
+        }
+        other => {
+            eprintln!("siemctl: invalid --format '{other}' (expected: text, json)");
+            return Ok(1);
         }
     }
     Ok(0)
@@ -1009,7 +1253,10 @@ fn cmd_retention(args: &[String]) -> Result<i32> {
             "--help" | "-h" => {
                 println!(
                     "Usage: siemctl retention --days N [--dry-run] [--yes] [--data-dir DIR]\n\n\
-                     Delete data files older than N days (raw logs and index DBs).\n\n\
+                     Delete data files older than N days (raw logs, index DBs, alert JSONL).\n\
+                     Also compacts data/alerts/ack.jsonl, dropping ack lines older than N\n\
+                     days — that file is append-only and never ages out on its own mtime\n\
+                     the way whole files do, since it's touched on every ack.\n\n\
                      --days 0 deletes ALL data — raw logs and indexes. Because that is\n\
                      irreversible it must be confirmed: answer the interactive prompt, or\n\
                      pass --yes for non-interactive (cron) use.\n\n\
@@ -1037,11 +1284,20 @@ fn cmd_retention(args: &[String]) -> Result<i32> {
     let cutoff = std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(u64::from(days) * 86_400))
         .unwrap_or(std::time::UNIX_EPOCH);
+    let cutoff_epoch =
+        cutoff.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
 
     let mut old: Vec<(PathBuf, u64)> = Vec::new();
     collect_old_files(&data_dir, cutoff, &mut old);
 
-    if old.is_empty() {
+    // `ack.jsonl` is a single continuously-appended file (see
+    // docs/roadmap-soc-improvements.md item 2) — its own mtime is always
+    // recent regardless of how old individual lines are, so the mtime-based
+    // sweep above can never clean it. Age its *lines* out separately.
+    let ack_path = data_dir.join("alerts").join("ack.jsonl");
+    let stale_ack_lines = alerts::compact_ack_log(&ack_path, cutoff_epoch, true).unwrap_or(0);
+
+    if old.is_empty() && stale_ack_lines == 0 {
         if days == 0 {
             println!("No data to delete under {}.", data_dir.display());
         } else {
@@ -1053,9 +1309,17 @@ fn cmd_retention(args: &[String]) -> Result<i32> {
     let total_bytes: u64 = old.iter().map(|(_, sz)| sz).sum();
 
     if dry_run {
-        println!("DRY RUN — would delete {} file(s), {} total:", old.len(), human_bytes(total_bytes));
-        for (p, sz) in &old {
-            println!("  {:>10}  {}", human_bytes(*sz), p.display());
+        if !old.is_empty() {
+            println!("DRY RUN — would delete {} file(s), {} total:", old.len(), human_bytes(total_bytes));
+            for (p, sz) in &old {
+                println!("  {:>10}  {}", human_bytes(*sz), p.display());
+            }
+        }
+        if stale_ack_lines > 0 {
+            println!(
+                "DRY RUN — would drop {stale_ack_lines} stale ack line(s) from {}",
+                ack_path.display()
+            );
         }
         return Ok(0);
     }
@@ -1096,6 +1360,8 @@ fn cmd_retention(args: &[String]) -> Result<i32> {
         }
     }
 
+    let ack_dropped = alerts::compact_ack_log(&ack_path, cutoff_epoch, false).unwrap_or(0);
+
     // Remove now-empty directories (multiple passes until nothing changes)
     let mut dirs_removed = 0usize;
     loop {
@@ -1106,8 +1372,10 @@ fn cmd_retention(args: &[String]) -> Result<i32> {
         }
     }
 
+    let ack_note =
+        if ack_dropped > 0 { format!(", {ack_dropped} stale ack line(s) compacted") } else { String::new() };
     println!(
-        "Retention complete: {deleted} file(s) deleted, {}, {dirs_removed} empty dir(s) removed.",
+        "Retention complete: {deleted} file(s) deleted, {}, {dirs_removed} empty dir(s) removed{ack_note}.",
         human_bytes(total_bytes)
     );
     Ok(0)

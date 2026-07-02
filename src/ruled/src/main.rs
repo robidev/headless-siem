@@ -10,9 +10,11 @@ use std::sync::{
 
 mod output;
 mod rules;
+mod suppress;
 
 const USAGE: &str = "\
-USAGE: ruled --rules <path> [--output <path>] [--dedup-window <secs>] [--help]
+USAGE: ruled --rules <path> [--output <path>] [--dedup-window <secs>] \
+[--suppress <path>] [--help]
 
   --rules <path>          Directory containing Sigma YAML rule files
   --output <path>         Optional output directory for filesystem alerts
@@ -20,6 +22,10 @@ USAGE: ruled --rules <path> [--output <path>] [--dedup-window <secs>] [--help]
                           this many seconds (default 5). 0 disables dedup —
                           use for batch/historical replay and to feed
                           count-based correlation without losing volume.
+  --suppress <path>       Optional TOML file of [[suppress]] rules (rule_id +
+                          condition) — matching alerts are dropped before
+                          being written. See docs/roadmap-soc-improvements.md
+                          item 4 / config/rules/suppress.toml.
   --help                  Print this help
 
 DESCRIPTION:
@@ -43,6 +49,7 @@ fn main() {
     let mut rules_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
     let mut dedup_window_secs: u64 = 5;
+    let mut suppress_path: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -71,6 +78,12 @@ fn main() {
                     eprintln!("[ruled] --dedup-window: invalid number of seconds: {}", raw);
                     std::process::exit(1);
                 });
+            }
+            "--suppress" => {
+                suppress_path = Some(PathBuf::from(args.next().unwrap_or_else(|| {
+                    eprintln!("[ruled] --suppress requires a path argument");
+                    std::process::exit(1);
+                })));
             }
             other => {
                 eprintln!("[ruled] unknown flag: {}", other);
@@ -110,8 +123,21 @@ fn main() {
         }
     };
 
+    // Suppression rules (optional)
+    let suppress_set = suppress_path.map(|p| match suppress::load(&p) {
+        Ok(s) => {
+            eprintln!("[ruled] loaded {} suppression rule(s) from {}", s.len(), p.display());
+            s
+        }
+        Err(e) => {
+            eprintln!("[ruled] failed to load suppression rules from {}: {}", p.display(), e);
+            std::process::exit(1);
+        }
+    });
+
     // Alert router
     let mut router = AlertRouter::new(output_path, dedup_window_secs);
+    let mut suppressed_count: u64 = 0;
 
     // Signal handling
     let running = Arc::new(AtomicBool::new(true));
@@ -158,6 +184,10 @@ fn main() {
         // Evaluate all rules against this event
         for rule in &rule_set.rules {
             if rule.matches(&event) {
+                if suppress_set.as_ref().is_some_and(|s| s.is_suppressed(&rule.id, &event)) {
+                    suppressed_count += 1;
+                    continue;
+                }
                 let _ = router.emit(
                     &rule.id,
                     &rule.title,
@@ -170,5 +200,9 @@ fn main() {
     }
 
     router.flush();
-    eprintln!("[ruled] shutdown complete");
+    if suppress_set.is_some() {
+        eprintln!("[ruled] shutdown complete ({suppressed_count} alert(s) suppressed)");
+    } else {
+        eprintln!("[ruled] shutdown complete");
+    }
 }

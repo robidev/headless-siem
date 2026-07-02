@@ -1,0 +1,31 @@
+# Alert suppression rules for `ruled` — see docs/roadmap-soc-improvements.md
+# item 4. Opt-in: `ruled` only reads this file when started with
+# `--suppress config/rules/suppress.toml` (see
+# config/systemd/headless-siem-ruled.service for how to enable it).
+#
+# `ruled`'s Sigma rule loader only reads `.yml`/`.yaml` files from
+# config/rules/, so this .toml file living alongside them is never picked up
+# as a detection rule.
+#
+# Each [[suppress]] block drops alerts for one rule_id when `condition`
+# matches the event that triggered it. `condition` is a small boolean
+# expression: `==`/`!=` against a literal, `cidr_match(field, "a.b.c.d/n")`,
+# combined with AND/OR/NOT and parentheses. Quotes around literals are
+# optional. `expires` is optional — after that date `ruled` logs a warning
+# at startup so the suppression gets reviewed instead of forgotten (it still
+# suppresses either way). `note` is documentation only, not evaluated.
+#
+# No rules are active by default — uncomment/adapt the example below once
+# you've identified a real false-positive pattern in your own alert stream
+# (`siemctl alerts --query "GROUP BY rule_id,rule_title"` is a good way to
+# find rules dominating your alert volume that might be candidates).
+
+# [[suppress]]
+# rule_id = "suricata-2210020"
+# condition = 'cidr_match(src_ip, "172.64.0.0/13")'
+# expires = "2026-12-31"
+# note = "Cloudflare CDN TCP teardown false positives"
+#
+# [[suppress]]
+# rule_id = "suricata-2210029"
+# condition = 'cidr_match(src_ip, "172.64.0.0/13")'
