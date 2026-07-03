@@ -177,11 +177,11 @@ start_ruled() {
 start_correlated() {
     "$BIN_DIR/correlated" \
         --config "$CONFIG_DIR/correlations.toml" \
-        --output "$DATA_DIR/correlated" \
+        --output "$DATA_DIR/alerts/correlated" \
         < "$RULED_PIPE" \
         2>"$LOG_DIR/correlated.log" &
     save_pid correlated $!
-    info "correlated  pid=$!  (config/correlations.toml → $DATA_DIR/correlated/)"
+    info "correlated  pid=$!  (config/correlations.toml → $DATA_DIR/alerts/correlated/)"
 }
 
 # Send one line as a UDP datagram to the running normalized instance.

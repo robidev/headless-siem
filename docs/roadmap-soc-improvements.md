@@ -17,7 +17,7 @@ Ordered by operational impact.
 > [user-guide.md](user-guide.md#alerts) for usage.
 
 **The problem:** Alerts from `ruled` land in `data/alerts/YYYY/MM/DD/HH/alerts.jsonl`
-and correlated alerts in `data/alerts/correlated/YYYY/MM/DD/correlated.jsonl`. There is
+and correlated alerts in `data/alerts/correlated/YYYY/MM/DD/HH/correlated.jsonl`. There is
 no siemctl interface for either. Finding and filtering alerts currently requires manual
 `find | xargs cat | jq` pipelines.
 

@@ -3,7 +3,7 @@
 #
 # Each test injects crafted syslog lines into a *running* dev pipeline over UDP
 # (the same path real logs take) and asserts that the expected alert or
-# correlation alert appears under data/alerts/ or data/correlated/.
+# correlation alert appears under data/alerts/ or data/alerts/correlated/.
 #
 # Prereqs:
 #   ./dev.sh start            (pipeline up, listening on $SIEM_PORT)
@@ -18,6 +18,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT="${SIEM_PORT:-5514}"
 DATA_DIR="${SIEM_DATA_DIR:-$REPO_ROOT/data}"
 SETTLE="${SIEM_TEST_SETTLE:-10}"   # max seconds to wait for an alert to appear
+SIEMCTL="$REPO_ROOT/target/debug/siemctl"
 
 # Colors (disabled if not a tty)
 if [ -t 1 ]; then
@@ -62,8 +63,12 @@ count_rule() {
 }
 
 # Total correlation alerts emitted for a correlation_id.
+# Reads data/alerts/correlated/ — the same tree `siemctl alerts --correlated`
+# queries. (Previously this read data/correlated/, which matched dev.sh's
+# old --output path but not siemctl's read path — correlations "fired" but
+# were invisible to any siemctl query. See implementation-plan.md 1.5.)
 count_corr() {
-  find "$DATA_DIR/correlated" -name '*.jsonl' -exec cat {} \; 2>/dev/null \
+  find "$DATA_DIR/alerts/correlated" -name '*.jsonl' -exec cat {} \; 2>/dev/null \
     | jq -r --arg c "$1" 'select(.correlation_id == $c) | .correlation_id' 2>/dev/null | wc -l
 }
 
@@ -94,15 +99,37 @@ expect_no_new_rule() {
 }
 
 # expect_new_corr CORR BASELINE — poll for a new correlation alert.
+#
+# Also asserts the alert is visible through `siemctl alerts --correlated` —
+# the actual query interface an agent uses — not just present as a raw file
+# on disk. This is the launcher-parity check the plan calls for: it fails
+# if dev.sh's correlated --output path and siemctl's read path ever
+# disagree again (this is exactly how the alerts-invisible-to-queries bug
+# in implementation-plan.md 1.5 shipped undetected).
 expect_new_corr() {
   local corr_id="$1" base="$2" waited=0 n=0 d=0
   while [ "$waited" -lt "$SETTLE" ]; do
     n=$(count_corr "$corr_id"); d=$((n - base))
-    [ "$d" -ge 1 ] && { echo "  ${C_GREEN}PASS${C_OFF} correlation $corr_id fired"; return 0; }
+    [ "$d" -ge 1 ] && break
     sleep 1; waited=$((waited + 1))
   done
-  echo "  ${C_RED}FAIL${C_OFF} correlation $corr_id did not fire within ${SETTLE}s"
-  return 1
+  if [ "$d" -lt 1 ]; then
+    echo "  ${C_RED}FAIL${C_OFF} correlation $corr_id did not fire within ${SETTLE}s"
+    return 1
+  fi
+  echo "  ${C_GREEN}PASS${C_OFF} correlation $corr_id fired ($d new)"
+  if [ -x "$SIEMCTL" ]; then
+    if "$SIEMCTL" alerts --data-dir "$DATA_DIR" --correlated 2>/dev/null \
+        | jq -e --arg c "$corr_id" 'select(.correlation_id == $c)' >/dev/null 2>&1; then
+      echo "  ${C_GREEN}PASS${C_OFF} correlation $corr_id visible via 'siemctl alerts --correlated'"
+    else
+      echo "  ${C_RED}FAIL${C_OFF} correlation $corr_id fired but NOT visible via 'siemctl alerts --correlated' (writer/reader path mismatch)"
+      return 1
+    fi
+  else
+    echo "  ${C_YEL}SKIP${C_OFF} siemctl binary not built at $SIEMCTL — skipping query-interface check"
+  fi
+  return 0
 }
 
 # require_dedup_off — skip a count-based test unless ruled runs with --dedup-window 0.

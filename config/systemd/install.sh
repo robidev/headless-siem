@@ -79,7 +79,7 @@ echo "  Done."
 # ── Create data directory ─────────────────────────────────────────────
 echo ""
 echo "Creating data directory at /var/lib/headless-siem/..."
-mkdir -p /var/lib/headless-siem/{raw,index,alerts,correlated}
+mkdir -p /var/lib/headless-siem/{raw,index,alerts/correlated}
 chown -R user:user /var/lib/headless-siem
 echo "  Done."
 
