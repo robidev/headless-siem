@@ -21,3 +21,8 @@ Thumbs.db
 .vscode/
 
 .git-credentials
+
+# Claude Code: local/session state, machine-specific (skills/ is tracked —
+# useful for cloners, unlike this).
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
