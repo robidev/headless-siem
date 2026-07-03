@@ -1,0 +1,37 @@
+[Unit]
+Description=Headless SIEM - Alert Notification Watcher (defense-in-depth, independent of the LLM analyst cron)
+Documentation=https://github.com/your-org/headless-siem
+After=network.target headless-siem-ruled.service headless-siem-correlated.service
+Wants=headless-siem-ruled.service headless-siem-correlated.service
+
+[Service]
+Type=simple
+User=user
+Environment=SIEM_DATA_DIR=/home/user/projects/headless-siem/data
+Environment=ALERT_WATCH_STATE_DIR=/var/lib/headless-siem/alert-watch
+Environment=SOC_NOTIFY_SCRIPT=/usr/local/bin/soc-notify
+Environment=ALERT_WATCH_LEVEL=high
+WorkingDirectory=/home/user/projects/headless-siem
+ExecStart=/home/user/projects/headless-siem/config/notify/alert-watch.sh
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+# Default in modern systemd, stated explicitly: SIGTERM/SIGKILL go to every
+# process in this unit's cgroup on stop/restart, not just the main PID —
+# this is what actually guarantees inotifywait dies alongside the script
+# even if something's own signal handling ever regresses. The script's own
+# `trap ... TERM INT` (see config/notify/alert-watch.sh) is defense in
+# depth for the same failure mode when run directly, outside systemd.
+KillMode=control-group
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/headless-siem/alert-watch
+ReadOnlyPaths=/home/user/projects/headless-siem/data/alerts /home/user/projects/headless-siem/config/notify
+
+[Install]
+WantedBy=multi-user.target

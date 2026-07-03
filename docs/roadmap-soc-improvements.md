@@ -65,6 +65,34 @@ are human-readable, survive crashes, and can be committed to git for audit trail
 
 ## 3. Notification dispatch
 
+> **Status: implemented** (2026-07-03, llm-based-soc implementation plan
+> Phase 1.3). Built the **alternative** design below (inotify watcher, no
+> `ruled`/`correlated` changes): `config/notify/alert-watch.sh` +
+> `config/systemd/headless-siem-alert-watch.service` +
+> `tests/integration/test-alert-watch.sh`. Watches `data/alerts/`
+> recursively; for `alerts.jsonl` (has `level`) forwards anything at or
+> above a configurable threshold (`ALERT_WATCH_LEVEL`, default `high`); for
+> `correlated.jsonl` (no `level` field — see this doc's own note further
+> down and `llm-based-soc/soc-structure/overall.md`'s correlated-alert
+> convention) always forwards, since a correlation is by definition a
+> multi-step compound pattern, inherently rarer/higher-signal than a single
+> rule firing. Calls the configured notify script
+> (`SOC_NOTIFY_SCRIPT`, default `/usr/local/bin/soc-notify`) as
+> `<script> <priority> <subject> <body-file>` — that script itself is an
+> `llm-based-soc` deployment artifact (see
+> `llm-based-soc/documentation/escalation.md`), not part of this repo;
+> until it's deployed, the watcher logs an error per alert instead of
+> silently doing nothing. Tracks a per-file byte offset (so a restart
+> doesn't replay history) and is independent of the LLM analyst's 10-minute
+> cron — the whole point is a signal path that still works if the agent
+> loop is down. See the script's own header comment for the full design
+> rationale, including a subtle bash pitfall it had to route around:
+> `kill -- -$$` inside a signal trap re-triggers that same trap unless the
+> trap is disabled first, and a plain single-PID `kill` doesn't reliably
+> stop a `cmd1 | cmd2` pipeline's other member — the fix is a
+> process-group kill (matching `KillMode=control-group`, systemd's own
+> default stop behavior for this unit).
+
 **The problem:** Alerts sit in files. A SOC analyst cannot watch a directory tree
 in real time. There is no active signal when something important fires.
 

@@ -38,11 +38,15 @@ install:
 	install -m 755 target/release/correlated   $(BIN_DIR)/headless-siem-correlated
 	install -m 755 target/release/siemctl      $(BIN_DIR)/siemctl
 	@echo "=== Installing systemd units to $(SYSTEMD_DIR) ==="
-	install -m 644 $(SYSTEMD_SRC)/headless-siem-normalized.service  $(SYSTEMD_DIR)/
-	install -m 644 $(SYSTEMD_SRC)/headless-siem-indexd.service      $(SYSTEMD_DIR)/
-	install -m 644 $(SYSTEMD_SRC)/headless-siem-ruled.service       $(SYSTEMD_DIR)/
-	install -m 644 $(SYSTEMD_SRC)/headless-siem-correlated.service  $(SYSTEMD_DIR)/
-	install -m 644 $(SYSTEMD_SRC)/headless-siem-pipes.service       $(SYSTEMD_DIR)/
+	install -m 644 $(SYSTEMD_SRC)/headless-siem-normalized.service    $(SYSTEMD_DIR)/
+	install -m 644 $(SYSTEMD_SRC)/headless-siem-indexd.service        $(SYSTEMD_DIR)/
+	install -m 644 $(SYSTEMD_SRC)/headless-siem-ruled.service         $(SYSTEMD_DIR)/
+	install -m 644 $(SYSTEMD_SRC)/headless-siem-correlated.service    $(SYSTEMD_DIR)/
+	install -m 644 $(SYSTEMD_SRC)/headless-siem-pipes.service         $(SYSTEMD_DIR)/
+	install -m 644 $(SYSTEMD_SRC)/headless-siem-alert-watch.service   $(SYSTEMD_DIR)/
+	@echo "=== NOTE: this target installs raw units referencing dev-tree paths."
+	@echo "    Use config/systemd/install.sh for a full production install"
+	@echo "    (rewrites paths, installs config/, creates /var/lib/headless-siem)."
 	@echo "=== Reloading systemd ==="
 	systemctl daemon-reload
 	@echo "=== Install complete ==="

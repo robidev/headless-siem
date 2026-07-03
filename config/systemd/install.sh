@@ -74,12 +74,16 @@ fi
 cp -r "$PROJECT_ROOT/config/rules" /etc/headless-siem/
 mkdir -p /etc/headless-siem/rsyslog.d
 cp "$PROJECT_ROOT/config/rsyslog.d/50-headless-siem.conf" /etc/headless-siem/rsyslog.d/
+mkdir -p /etc/headless-siem/notify
+cp "$PROJECT_ROOT/config/notify/alert-watch.sh" /etc/headless-siem/notify/
+chmod 755 /etc/headless-siem/notify/alert-watch.sh
 echo "  Done."
 
 # ── Create data directory ─────────────────────────────────────────────
 echo ""
 echo "Creating data directory at /var/lib/headless-siem/..."
 mkdir -p /var/lib/headless-siem/{raw,index,alerts/correlated}
+mkdir -p /var/lib/headless-siem/alert-watch
 chown -R user:user /var/lib/headless-siem
 echo "  Done."
 
@@ -88,7 +92,7 @@ echo ""
 echo "Installing systemd units to /etc/systemd/system/..."
 
 # Update service files to use installed paths
-for svc in normalized indexd ruled correlated pipes; do
+for svc in normalized indexd ruled correlated pipes alert-watch; do
     SRC="$PROJECT_ROOT/config/systemd/headless-siem-${svc}.service"
     if [[ -f "$SRC" ]]; then
         # Copy and adjust paths for installed layout
@@ -118,6 +122,7 @@ systemctl enable headless-siem-normalized.service
 systemctl enable headless-siem-indexd.service
 systemctl enable headless-siem-ruled.service
 systemctl enable headless-siem-correlated.service
+systemctl enable headless-siem-alert-watch.service
 
 echo ""
 echo "Starting services..."
@@ -127,12 +132,13 @@ systemctl start headless-siem-normalized.service
 systemctl start headless-siem-indexd.service
 systemctl start headless-siem-ruled.service
 systemctl start headless-siem-correlated.service
+systemctl start headless-siem-alert-watch.service
 
 # ── Verify ─────────────────────────────────────────────────────────────
 echo ""
 echo "=== Checking service status ==="
 sleep 2
-for svc in pipes normalized indexd ruled correlated; do
+for svc in pipes normalized indexd ruled correlated alert-watch; do
     STATUS=$(systemctl is-active headless-siem-${svc}.service 2>/dev/null || echo "unknown")
     echo "  headless-siem-${svc}.service: $STATUS"
 done
@@ -148,3 +154,11 @@ echo ""
 echo "To feed logs via rsyslog, copy the config and restart rsyslog:"
 echo "  cp /etc/headless-siem/rsyslog.d/50-headless-siem.conf /etc/rsyslog.d/"
 echo "  systemctl restart rsyslog"
+echo ""
+echo "headless-siem-alert-watch depends on /usr/local/bin/soc-notify, which"
+echo "this installer does NOT provide (it's an llm-based-soc deployment"
+echo "artifact, not part of the SIEM itself — see"
+echo "llm-based-soc/documentation/escalation.md). Until soc-notify exists,"
+echo "alert-watch logs an error per high/critical alert instead of paging"
+echo "you; check with:"
+echo "  journalctl -u headless-siem-alert-watch -f"

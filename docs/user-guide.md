@@ -513,6 +513,21 @@ the way `alerts.jsonl`/`correlated.jsonl` buckets do — `siemctl retention`
 compacts it too (drops ack lines older than `--days`), so the same
 retention cron job you already run keeps this tidy without extra setup.
 
+**Active notification (defense in depth).** `siemctl alerts` is pull-based —
+nothing pages you until you run it. `config/notify/alert-watch.sh` is the
+push side: an inotify watcher on `data/alerts/` (independent of any
+LLM/agent loop polling the SIEM) that calls a notify script for every
+high/critical `ruled` alert and every correlated alert (correlated alerts
+carry no `level`, so there's nothing to threshold — any correlation is
+forwarded). See `docs/roadmap-soc-improvements.md` item 3 for the full
+design and `config/systemd/headless-siem-alert-watch.service` to run it
+as a service. Quick manual run:
+
+```bash
+SOC_NOTIFY_SCRIPT=/path/to/your/notify-script.sh \
+  config/notify/alert-watch.sh
+```
+
 ### Live Tail
 
 Stream events as they arrive:
