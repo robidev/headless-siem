@@ -32,7 +32,7 @@ echo "[3] --rules required"
 
 echo "[4] loads sample rules"
 OUT=$("$RULED" --rules "$RULES_DIR" 2>&1 <<< "" || true)
-echo "$OUT" | grep -q "loaded 5 rules" && pass "loads 5 rules" || fail "loads 5 rules" "got: $OUT"
+echo "$OUT" | grep -q "loaded 10 rules" && pass "loads 10 rules" || fail "loads 10 rules" "got: $OUT"
 
 echo "[5] matches SSH failed event"
 RESULT=$(echo '{"_source_type":"sshd","event_type":"ssh_auth_failure","src_ip":"10.0.0.5"}' | "$RULED" --rules "$RULES_DIR" 2>/dev/null)
