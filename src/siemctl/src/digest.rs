@@ -64,6 +64,15 @@ pub const DEFAULT_CONCENTRATION_THRESHOLD_PCT: f64 = 80.0;
 pub const DEFAULT_WAN_INTERFACE: &str = "re1";
 pub const DEFAULT_TOP_BLOCKED_LIMIT: usize = 20;
 
+/// Minimum fraction of the baseline window that must actually have data on
+/// disk before it's trusted as a real comparison baseline — see
+/// `build_report`'s cold-start doc comment. Deliberately a majority-of-window
+/// bar, not a low bar like 10%: a baseline with only a few scattered hours
+/// of real data out of a multi-day window may still miss whole daily-rhythm
+/// sources (a `cron` job that only runs at 03:00, say), so "some data
+/// exists" isn't the same as "this is a trustworthy comparison point."
+const COLD_START_COVERAGE_FLOOR: f64 = 0.50;
+
 /// Auth-failure `event_type`s that carry a `src_ip` — see the module doc
 /// comment for why `sudo_auth_failure`/`local_auth_failure` are excluded.
 const AUTH_FAILURE_EVENT_TYPES: &[&str] =
@@ -73,6 +82,18 @@ const SUCCESS_EVENT_TYPES: &[&str] = &["ssh_auth_success"];
 
 const SERVICE_TRANSITION_EVENT_TYPES: &[&str] =
     &["unit_started", "unit_stopped", "unit_stopping", "unit_failed"];
+
+/// Unit transitions whose `first_seen` timestamps land within this many
+/// seconds of each other are considered part of the same boot/shutdown
+/// storm rather than independent restarts — see [`collapse_boot_storms`].
+pub const BOOT_STORM_GAP_SECONDS: i64 = 300;
+
+/// Minimum distinct units clustered within [`BOOT_STORM_GAP_SECONDS`] to be
+/// collapsed into one boot-storm summary instead of listed individually.
+/// A genuine reboot produces dozens; a couple of unrelated units restarting
+/// minutes apart (a config reload, a crash-restart) is normal noise and
+/// should stay visible per-unit.
+const BOOT_STORM_MIN_UNITS: usize = 5;
 
 // ── Top-level report ────────────────────────────────────────────────────────
 
@@ -132,6 +153,37 @@ pub fn build_report(
     interval: Duration,
 ) -> Result<DigestReport> {
     let baseline = win.baseline();
+
+    // Cold-start: less than COLD_START_COVERAGE_FLOOR of the baseline
+    // window actually has data on disk — every source looks "new" not
+    // because it's actually new, but because the SIEM itself is only a few
+    // days old and there's no real prior period to compare against.
+    //
+    // Two simpler approaches were tried and rejected:
+    // - Comparing `baseline.start` against the earliest raw event on disk:
+    //   false-positives on almost every real baseline, since actual event
+    //   timestamps essentially never land exactly on the window's nominal
+    //   start (seen live: a baseline "starting" 10 minutes into its hour
+    //   still has 50 real minutes of coverage — not a cold start).
+    // - Comparing total baseline event *count* against the window's count:
+    //   false-positives on a genuine volume spike (window count \u{226b}
+    //   baseline count is also what a real attack/anomaly looks like, not
+    //   just "not enough history yet").
+    //
+    // The time-coverage-fraction below avoids both: it only cares how much
+    // of the baseline *window*, by wall-clock duration, falls after data
+    // collection began — immune to rate differences between the two
+    // periods, and tolerant of a baseline that starts a little before the
+    // first real event.
+    let cold_start = digest_query::earliest_raw_event_time(data_dir)
+        .map(|earliest| {
+            let baseline_seconds = (baseline.end - baseline.start).num_seconds().max(1) as f64;
+            let covered_start = earliest.max(baseline.start);
+            let covered_seconds = (baseline.end - covered_start).num_seconds().max(0) as f64;
+            covered_seconds < baseline_seconds * COLD_START_COVERAGE_FLOOR
+        })
+        .unwrap_or(false);
+
     Ok(DigestReport {
         window: WindowInfo {
             start: win.start,
@@ -139,8 +191,8 @@ pub fn build_report(
             baseline_start: baseline.start,
             baseline_end: baseline.end,
         },
-        coverage: build_coverage(data_dir, win, cfg)?,
-        volume: build_volume(data_dir, win, cfg)?,
+        coverage: build_coverage(data_dir, win, cfg, cold_start)?,
+        volume: build_volume(data_dir, win, cfg, cold_start)?,
         network: build_network_with_interval(data_dir, win, cfg, interval)?,
         auth: build_auth(data_dir, win)?,
         alerts: build_alerts(data_dir, win, cfg)?,
@@ -177,9 +229,19 @@ pub struct CoverageSection {
     /// only compares the newest timestamp on each side) cannot see. See
     /// `digest_query::completeness_in_range`'s doc comment.
     pub incomplete_buckets: Vec<IncompleteBucket>,
+    /// True when the baseline window starts before the earliest raw event
+    /// on disk — there's no real prior period to compare against, so
+    /// `new_sources` is suppressed (left empty) rather than flooding with
+    /// every currently-reporting source. See `build_report`'s doc comment.
+    pub cold_start: bool,
 }
 
-pub fn build_coverage(data_dir: &Path, win: &Window, cfg: &DigestConfig) -> Result<CoverageSection> {
+pub fn build_coverage(
+    data_dir: &Path,
+    win: &Window,
+    cfg: &DigestConfig,
+    cold_start: bool,
+) -> Result<CoverageSection> {
     let window_counts = digest_query::group_count_in_range(data_dir, win, &["_source_type"], None, &[])?;
     let baseline_counts =
         digest_query::group_count_in_range(data_dir, &win.baseline(), &["_source_type"], None, &[])?;
@@ -190,7 +252,11 @@ pub fn build_coverage(data_dir: &Path, win: &Window, cfg: &DigestConfig) -> Resu
         baseline_counts.keys().filter_map(|k| k.first()).filter(|s| !s.is_empty()).cloned().collect();
 
     let gone_silent: Vec<String> = baseline_sources.difference(&window_sources).cloned().collect();
-    let new_sources: Vec<String> = window_sources.difference(&baseline_sources).cloned().collect();
+    let new_sources: Vec<String> = if cold_start {
+        Vec::new()
+    } else {
+        window_sources.difference(&baseline_sources).cloned().collect()
+    };
 
     let unparsed_high_volume = unparsed_high_volume_sources(data_dir, win, cfg.unparsed_min_events);
 
@@ -219,6 +285,7 @@ pub fn build_coverage(data_dir: &Path, win: &Window, cfg: &DigestConfig) -> Resu
         latest_indexed,
         index_lag_seconds,
         incomplete_buckets,
+        cold_start,
     })
 }
 
@@ -260,7 +327,12 @@ pub struct VolumeRow {
     pub flag: Option<String>,
 }
 
-pub fn build_volume(data_dir: &Path, win: &Window, cfg: &DigestConfig) -> Result<Vec<VolumeRow>> {
+pub fn build_volume(
+    data_dir: &Path,
+    win: &Window,
+    cfg: &DigestConfig,
+    cold_start: bool,
+) -> Result<Vec<VolumeRow>> {
     let window_counts = digest_query::group_count_in_range(data_dir, win, &["_source_type"], None, &[])?;
     let baseline_counts =
         digest_query::group_count_in_range(data_dir, &win.baseline(), &["_source_type"], None, &[])?;
@@ -281,7 +353,11 @@ pub fn build_volume(data_dir: &Path, win: &Window, cfg: &DigestConfig) -> Result
             let count = *window_counts.get(&key).unwrap_or(&0);
             let baseline = *baseline_counts.get(&key).unwrap_or(&0);
             let (delta_pct, flag) = if baseline == 0 {
-                let flag = (cfg.new_source_always_flag && count > 0).then(|| "new".to_string());
+                // Cold start: baseline is empty because there's no history
+                // yet, not because this source is actually new — never
+                // flag, regardless of new_source_always_flag.
+                let flag =
+                    (!cold_start && cfg.new_source_always_flag && count > 0).then(|| "new".to_string());
                 (None, flag)
             } else {
                 let pct = ((count as f64 - baseline as f64) / baseline as f64) * 100.0;
@@ -688,6 +764,18 @@ pub struct ServiceRestart {
     pub last_seen: Option<DateTime<Utc>>,
 }
 
+/// A cluster of `BOOT_STORM_MIN_UNITS`+ distinct units transitioning within
+/// `BOOT_STORM_GAP_SECONDS` of each other — almost always one desktop
+/// reboot/shutdown, not `unit_count` independent restarts worth separately
+/// escalating. See [`collapse_boot_storms`].
+#[derive(Debug, Serialize)]
+pub struct BootStorm {
+    pub unit_count: usize,
+    pub units: Vec<String>,
+    pub first_seen: Option<DateTime<Utc>>,
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CriticalEvent {
     pub timestamp: Option<DateTime<Utc>>,
@@ -699,16 +787,72 @@ pub struct CriticalEvent {
 #[derive(Debug, Serialize)]
 pub struct NotableSection {
     pub config_changes: Vec<ConfigChange>,
+    /// Individual unit transitions *not* absorbed into a `boot_storms` entry.
     pub service_restarts: Vec<ServiceRestart>,
+    /// Boot/shutdown storms collapsed out of `service_restarts` — see
+    /// [`collapse_boot_storms`]. A Tier-1 agent should treat one storm as
+    /// one event (a reboot), not `unit_count` events.
+    pub boot_storms: Vec<BootStorm>,
     pub critical_events: Vec<CriticalEvent>,
 }
 
 pub fn build_notable(data_dir: &Path, win: &Window) -> Result<NotableSection> {
+    let (service_restarts, boot_storms) = collapse_boot_storms(service_restarts(data_dir, win)?);
     Ok(NotableSection {
         config_changes: config_changes(data_dir, win)?,
-        service_restarts: service_restarts(data_dir, win)?,
+        service_restarts,
+        boot_storms,
         critical_events: critical_events(data_dir, win)?,
     })
+}
+
+/// Cluster `ServiceRestart` rows by `first_seen` proximity
+/// (`BOOT_STORM_GAP_SECONDS`) and pull out any cluster of
+/// `BOOT_STORM_MIN_UNITS`+ distinct units as a [`BootStorm`], leaving
+/// everything else as individual rows.
+///
+/// Without this, one desktop reboot (dozens of units each transitioning
+/// once — every row reads `"1x transition(s)"`, hence the name) floods the
+/// Notable Events section with one line per unit, which a Tier-1 agent has
+/// no way to distinguish from dozens of *independent* restarts worth
+/// individually investigating.
+fn collapse_boot_storms(mut rows: Vec<ServiceRestart>) -> (Vec<ServiceRestart>, Vec<BootStorm>) {
+    // Rows without a first_seen can't be clustered — never entered a storm.
+    let (mut clusterable, unclustered): (Vec<ServiceRestart>, Vec<ServiceRestart>) =
+        rows.drain(..).partition(|r| r.first_seen.is_some());
+    clusterable.sort_by_key(|r| r.first_seen);
+
+    let mut kept = unclustered;
+    let mut storms = Vec::new();
+    let mut cluster: Vec<ServiceRestart> = Vec::new();
+
+    let flush = |cluster: &mut Vec<ServiceRestart>, kept: &mut Vec<ServiceRestart>, storms: &mut Vec<BootStorm>| {
+        if cluster.len() >= BOOT_STORM_MIN_UNITS {
+            let first_seen = cluster.iter().filter_map(|r| r.first_seen).min();
+            let last_seen = cluster.iter().filter_map(|r| r.last_seen).max();
+            let mut units: Vec<String> = cluster.iter().map(|r| r.unit.clone()).collect();
+            units.sort();
+            storms.push(BootStorm { unit_count: cluster.len(), units, first_seen, last_seen });
+        } else {
+            kept.extend(cluster.drain(..));
+        }
+        cluster.clear();
+    };
+
+    for row in clusterable {
+        if let Some(last) = cluster.last() {
+            let gap = (row.first_seen.unwrap() - last.first_seen.unwrap()).num_seconds();
+            if gap > BOOT_STORM_GAP_SECONDS {
+                flush(&mut cluster, &mut kept, &mut storms);
+            }
+        }
+        cluster.push(row);
+    }
+    flush(&mut cluster, &mut kept, &mut storms);
+
+    kept.sort_by(|a, b| b.count.cmp(&a.count).then(a.unit.cmp(&b.unit)));
+    storms.sort_by_key(|s| s.first_seen);
+    (kept, storms)
 }
 
 fn config_changes(data_dir: &Path, win: &Window) -> Result<Vec<ConfigChange>> {
@@ -933,7 +1077,7 @@ mod tests {
 
         // window_with_matching_baseline() itself has no data, so every
         // source that reported in its baseline (08:00-09:00) is gone silent.
-        let cov = build_coverage(&tmp.path, &window_with_matching_baseline(), &DigestConfig::default())
+        let cov = build_coverage(&tmp.path, &window_with_matching_baseline(), &DigestConfig::default(), false)
             .unwrap();
         assert_eq!(cov.sources_reporting, 0);
         assert!(cov.gone_silent.contains(&"suricata".to_string()));
@@ -949,7 +1093,7 @@ mod tests {
 
         // window()'s derived baseline (13:00-14:00) is empty, so every
         // source present in the window bucket counts as "new".
-        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default()).unwrap();
+        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), false).unwrap();
         assert!(cov.new_sources.contains(&"openvpn".to_string()));
         assert!(cov.new_sources.contains(&"sshd".to_string()));
         assert_eq!(cov.sources_reporting, cov.new_sources.len());
@@ -979,7 +1123,7 @@ mod tests {
         )
         .unwrap();
 
-        let cov = build_coverage(&tmp.path, &win, &DigestConfig::default()).unwrap();
+        let cov = build_coverage(&tmp.path, &win, &DigestConfig::default(), false).unwrap();
         assert_eq!(cov.unparsed_high_volume.len(), 1);
         assert_eq!(cov.unparsed_high_volume[0].app_name, "gnome-shell");
         assert_eq!(cov.unparsed_high_volume[0].count, 51);
@@ -995,7 +1139,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sshd.jsonl"), "{}\n").unwrap();
 
-        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default()).unwrap();
+        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), false).unwrap();
         assert_eq!(cov.latest_raw, Some(ymdhms(2026, 6, 29, 14, 27, 0)));
         assert_eq!(cov.latest_indexed, Some(ymdhms(2026, 6, 29, 14, 17, 0)));
         assert_eq!(cov.index_lag_seconds, Some(600));
@@ -1016,7 +1160,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sshd.jsonl"), "{}\n{}\n{}\n").unwrap();
 
-        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default()).unwrap();
+        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), false).unwrap();
         assert_eq!(cov.incomplete_buckets.len(), 1);
         assert_eq!(cov.incomplete_buckets[0].bucket, "2026-06-29-14");
         assert_eq!(cov.incomplete_buckets[0].raw_count, 3);
@@ -1029,8 +1173,103 @@ mod tests {
         seed_fixture(&tmp.path);
         // seed_fixture only writes index rows, no raw files — completeness
         // has nothing to compare against, so it must not false-positive.
-        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default()).unwrap();
+        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), false).unwrap();
         assert!(cov.incomplete_buckets.is_empty());
+    }
+
+    #[test]
+    fn coverage_cold_start_suppresses_new_sources_but_reports_it() {
+        let tmp = TempDir::new();
+        seed_fixture(&tmp.path);
+        // Passing cold_start=true directly (the flag build_report would
+        // compute when the baseline predates the earliest raw event) — every
+        // source in the window would otherwise show up in new_sources per
+        // coverage_new_source_detected_against_adjacent_baseline.
+        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), true).unwrap();
+        assert!(cov.cold_start);
+        assert!(cov.new_sources.is_empty(), "cold start must suppress new_sources, not flood it");
+    }
+
+    #[test]
+    fn build_report_detects_cold_start_from_earliest_raw_event() {
+        let tmp = TempDir::new();
+        // Earliest data on disk starts at 14:00 on the window's own day —
+        // window()'s baseline (13:00-14:00) predates that, so this is a
+        // genuine cold start: there's no real prior period on disk yet.
+        std::fs::create_dir_all(tmp.path.join("raw/2026/06/29/14/00/00")).unwrap();
+        std::fs::write(
+            tmp.path.join("raw/2026/06/29/14/00/00/sshd.jsonl"),
+            "{\"timestamp\":\"2026-06-29T14:00:00Z\",\"_source_type\":\"sshd\"}\n",
+        )
+        .unwrap();
+
+        let report =
+            build_report(&tmp.path, &window(), &DigestConfig::default(), Duration::minutes(10))
+                .unwrap();
+        assert!(report.coverage.cold_start);
+    }
+
+    #[test]
+    fn build_report_not_cold_start_once_history_covers_the_baseline() {
+        let tmp = TempDir::new();
+        // Earliest data predates the baseline window entirely — a real,
+        // fully-populated prior period exists.
+        std::fs::create_dir_all(tmp.path.join("raw/2026/06/20/00/00/00")).unwrap();
+        std::fs::write(
+            tmp.path.join("raw/2026/06/20/00/00/00/sshd.jsonl"),
+            "{\"timestamp\":\"2026-06-20T00:00:00Z\",\"_source_type\":\"sshd\"}\n",
+        )
+        .unwrap();
+
+        let report =
+            build_report(&tmp.path, &window(), &DigestConfig::default(), Duration::minutes(10))
+                .unwrap();
+        assert!(!report.coverage.cold_start);
+    }
+
+    #[test]
+    fn build_report_not_cold_start_with_partial_but_substantial_baseline_coverage() {
+        // Regression case: window()'s baseline is 13:00-14:00 (1h). Data
+        // starts at 13:10, i.e. the baseline window is missing its first 10
+        // minutes but has 50 real minutes (83% coverage) — nowhere near
+        // cold-start territory, even though the naive "does data exist
+        // exactly at baseline.start" check used to false-positive on
+        // exactly this shape (see test-siemctl-digest.sh's fixture, which
+        // starts baseline data at 13:10 for the same reason).
+        let tmp = TempDir::new();
+        std::fs::create_dir_all(tmp.path.join("raw/2026/06/29/13/10/00")).unwrap();
+        std::fs::write(
+            tmp.path.join("raw/2026/06/29/13/10/00/sshd.jsonl"),
+            "{\"timestamp\":\"2026-06-29T13:10:00Z\",\"_source_type\":\"sshd\"}\n",
+        )
+        .unwrap();
+
+        let report =
+            build_report(&tmp.path, &window(), &DigestConfig::default(), Duration::minutes(10))
+                .unwrap();
+        assert!(!report.coverage.cold_start);
+    }
+
+    #[test]
+    fn build_report_cold_start_with_only_a_sliver_of_baseline_coverage() {
+        // The live bug this whole feature exists for: earliest data lands
+        // in just the last few minutes of a much longer baseline window
+        // (a 72h digest run 3 days into collection) — under the coverage
+        // floor (50%), so still a cold start despite *some* overlap.
+        let tmp = TempDir::new();
+        std::fs::create_dir_all(tmp.path.join("raw/2026/06/29/13/55/00")).unwrap();
+        std::fs::write(
+            tmp.path.join("raw/2026/06/29/13/55/00/sshd.jsonl"),
+            "{\"timestamp\":\"2026-06-29T13:55:00Z\",\"_source_type\":\"sshd\"}\n",
+        )
+        .unwrap();
+
+        // Only the last 5 of 60 baseline minutes (~8%) have any data —
+        // under the coverage floor.
+        let report =
+            build_report(&tmp.path, &window(), &DigestConfig::default(), Duration::minutes(10))
+                .unwrap();
+        assert!(report.coverage.cold_start);
     }
 
     // ── volume ───────────────────────────────────────────────────────────
@@ -1040,11 +1279,22 @@ mod tests {
         let tmp = TempDir::new();
         seed_fixture(&tmp.path);
 
-        let rows = build_volume(&tmp.path, &window(), &DigestConfig::default()).unwrap();
+        let rows = build_volume(&tmp.path, &window(), &DigestConfig::default(), false).unwrap();
         let sshd = rows.iter().find(|r| r.source == "sshd").unwrap();
         assert_eq!(sshd.baseline, 0);
         assert_eq!(sshd.flag.as_deref(), Some("new"));
         assert_eq!(sshd.delta_pct, None);
+    }
+
+    #[test]
+    fn volume_cold_start_suppresses_new_flag() {
+        let tmp = TempDir::new();
+        seed_fixture(&tmp.path);
+
+        let rows = build_volume(&tmp.path, &window(), &DigestConfig::default(), true).unwrap();
+        let sshd = rows.iter().find(|r| r.source == "sshd").unwrap();
+        assert_eq!(sshd.baseline, 0);
+        assert_eq!(sshd.flag, None, "cold start must suppress the 'new' flag even though baseline is 0");
     }
 
     #[test]
@@ -1053,7 +1303,7 @@ mod tests {
         seed_fixture(&tmp.path);
 
         let cfg = DigestConfig { new_source_always_flag: false, ..DigestConfig::default() };
-        let rows = build_volume(&tmp.path, &window(), &cfg).unwrap();
+        let rows = build_volume(&tmp.path, &window(), &cfg, false).unwrap();
         let sshd = rows.iter().find(|r| r.source == "sshd").unwrap();
         assert_eq!(sshd.baseline, 0);
         assert_eq!(sshd.flag, None);
@@ -1097,7 +1347,7 @@ mod tests {
         drop(conn);
 
         let win = Window { start: ymdhms(2026, 6, 29, 20, 0, 0), end: ymdhms(2026, 6, 29, 21, 0, 0) };
-        let rows = build_volume(&tmp.path, &win, &DigestConfig::default()).unwrap();
+        let rows = build_volume(&tmp.path, &win, &DigestConfig::default(), false).unwrap();
         let openvpn = rows.iter().find(|r| r.source == "openvpn").unwrap();
         assert_eq!(openvpn.count, 9);
         assert_eq!(openvpn.baseline, 1);
@@ -1221,6 +1471,126 @@ mod tests {
         assert_eq!(restart.count, 2);
         assert_eq!(restart.first_seen, Some(ymdhms(2026, 6, 29, 14, 14, 0)));
         assert_eq!(restart.last_seen, Some(ymdhms(2026, 6, 29, 14, 14, 30)));
+    }
+
+    // ── boot storm collapsing ───────────────────────────────────────────────
+
+    fn restart_row(unit: &str, seen: DateTime<Utc>) -> ServiceRestart {
+        ServiceRestart { unit: unit.to_string(), count: 1, first_seen: Some(seen), last_seen: Some(seen) }
+    }
+
+    #[test]
+    fn collapse_boot_storms_leaves_a_few_units_uncollapsed() {
+        // Below BOOT_STORM_MIN_UNITS (5) — a couple of units restarting
+        // close together is normal noise, not a reboot.
+        let rows = vec![
+            restart_row("sshguard.service", ymdhms(2026, 6, 29, 3, 0, 0)),
+            restart_row("cron.service", ymdhms(2026, 6, 29, 3, 0, 5)),
+            restart_row("dbus.service", ymdhms(2026, 6, 29, 3, 0, 9)),
+        ];
+        let (kept, storms) = collapse_boot_storms(rows);
+        assert_eq!(kept.len(), 3);
+        assert!(storms.is_empty());
+    }
+
+    #[test]
+    fn collapse_boot_storms_collapses_a_tight_burst() {
+        // >= BOOT_STORM_MIN_UNITS transitioning within BOOT_STORM_GAP_SECONDS
+        // of each other — a reboot, per the live 03:00 shakedown finding.
+        let units = ["NetworkManager", "sshd", "cron", "dbus", "systemd-logind", "cups"];
+        let rows: Vec<ServiceRestart> = units
+            .iter()
+            .enumerate()
+            .map(|(i, u)| restart_row(u, ymdhms(2026, 6, 29, 3, 0, i as u32 * 3)))
+            .collect();
+
+        let (kept, storms) = collapse_boot_storms(rows);
+        assert!(kept.is_empty(), "all 6 units should be absorbed into the storm");
+        assert_eq!(storms.len(), 1);
+        assert_eq!(storms[0].unit_count, 6);
+        assert_eq!(storms[0].first_seen, Some(ymdhms(2026, 6, 29, 3, 0, 0)));
+        assert_eq!(storms[0].last_seen, Some(ymdhms(2026, 6, 29, 3, 0, 15)));
+        for u in units {
+            assert!(storms[0].units.contains(&u.to_string()));
+        }
+    }
+
+    #[test]
+    fn collapse_boot_storms_does_not_merge_across_a_large_gap() {
+        // Two separate 5-unit bursts 20 minutes apart (e.g. a reboot, then
+        // later a batch config-reload) — two storms, not one spanning both.
+        let mut rows: Vec<ServiceRestart> = (0..5)
+            .map(|i| restart_row(&format!("a{i}"), ymdhms(2026, 6, 29, 3, 0, i * 2)))
+            .collect();
+        rows.extend((0..5).map(|i| restart_row(&format!("b{i}"), ymdhms(2026, 6, 29, 3, 20, i * 2))));
+
+        let (kept, storms) = collapse_boot_storms(rows);
+        assert!(kept.is_empty());
+        assert_eq!(storms.len(), 2, "a 20-minute gap must not merge into one storm");
+    }
+
+    #[test]
+    fn collapse_boot_storms_mixed_leaves_non_storm_units_individually_listed() {
+        // A 5-unit reboot burst at 03:00, plus one unrelated unit restart
+        // at 09:00 — the storm collapses, the lone restart stays visible.
+        let mut rows: Vec<ServiceRestart> = (0..5)
+            .map(|i| restart_row(&format!("boot{i}"), ymdhms(2026, 6, 29, 3, 0, i * 2)))
+            .collect();
+        rows.push(restart_row("haproxy.service", ymdhms(2026, 6, 29, 9, 0, 0)));
+
+        let (kept, storms) = collapse_boot_storms(rows);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].unit, "haproxy.service");
+        assert_eq!(storms.len(), 1);
+        assert_eq!(storms[0].unit_count, 5);
+    }
+
+    #[test]
+    fn collapse_boot_storms_rows_without_first_seen_are_never_clustered() {
+        let rows = vec![ServiceRestart {
+            unit: "mystery.service".to_string(),
+            count: 1,
+            first_seen: None,
+            last_seen: None,
+        }];
+        let (kept, storms) = collapse_boot_storms(rows);
+        assert_eq!(kept.len(), 1);
+        assert!(storms.is_empty());
+    }
+
+    #[test]
+    fn build_notable_surfaces_boot_storm_from_real_events() {
+        let tmp = TempDir::new();
+        let idx = tmp.path.join("index");
+        std::fs::create_dir_all(&idx).unwrap();
+        let db = idx.join("2026-06-29-03.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (raw_file TEXT, _source_type TEXT, event_type TEXT, unit TEXT);",
+        )
+        .unwrap();
+        let insert =
+            "INSERT INTO events (raw_file, _source_type, event_type, unit) VALUES (?1,?2,?3,?4)";
+        let units = ["a.service", "b.service", "c.service", "d.service", "e.service", "f.service"];
+        for (i, u) in units.iter().enumerate() {
+            conn.execute(
+                insert,
+                rusqlite::params![
+                    format!("raw/2026/06/29/03/00/{:02}/systemd.jsonl", i),
+                    "systemd",
+                    "unit_started",
+                    u,
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let win = Window { start: ymdhms(2026, 6, 29, 3, 0, 0), end: ymdhms(2026, 6, 29, 4, 0, 0) };
+        let notable = build_notable(&tmp.path, &win).unwrap();
+        assert_eq!(notable.boot_storms.len(), 1);
+        assert_eq!(notable.boot_storms[0].unit_count, 6);
+        assert!(notable.service_restarts.is_empty());
     }
 
     // ── alerts ───────────────────────────────────────────────────────────

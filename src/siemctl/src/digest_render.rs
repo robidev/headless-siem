@@ -60,6 +60,26 @@ fn fmt_opt_hms(t: Option<DateTime<Utc>>) -> String {
     t.map(fmt_hms).unwrap_or_else(|| "?".to_string())
 }
 
+/// Date-qualified timestamp, for window headers whose start/end span more
+/// than one calendar day.
+fn fmt_dhm(t: DateTime<Utc>) -> String {
+    t.format("%Y-%m-%d %H:%M").to_string()
+}
+
+/// Format a set of timestamps that appear together on one header line,
+/// switching to date-qualified form for *all* of them if any two fall on
+/// different calendar days.
+///
+/// Without this, a window whose length is a multiple of 24h (a 72h digest
+/// being the common case) renders as e.g. `COVERAGE (21:08 – 21:08)` —
+/// start and end land on the same time-of-day on different dates, so the
+/// HH:MM-only form looks like a zero-length or malformed window instead of
+/// the 3-day span it actually is.
+fn fmt_header_times<const N: usize>(ts: [DateTime<Utc>; N]) -> [String; N] {
+    let spans_days = ts.windows(2).any(|w| w[0].date_naive() != w[1].date_naive());
+    ts.map(|t| if spans_days { fmt_dhm(t) } else { fmt_hm(t) })
+}
+
 /// Human label for a `chrono::Duration` used only as a bucket-size caption
 /// (e.g. `10min`, `1h`) — mirrors `time::parse_duration`'s units, largest
 /// unit that divides evenly wins so "1h" reads better than "60min".
@@ -87,10 +107,15 @@ fn list_or_none(items: &[String]) -> String {
 fn render_coverage(out: &mut String, report: &DigestReport) {
     let w = &report.window;
     let cov = &report.coverage;
-    out.push_str(&format!("=== COVERAGE ({} \u{2013} {}) ===\n\n", fmt_hm(w.start), fmt_hm(w.end)));
+    let [ws, we] = fmt_header_times([w.start, w.end]);
+    out.push_str(&format!("=== COVERAGE ({} \u{2013} {}) ===\n\n", ws, we));
     out.push_str(&format!("Sources reporting:     {}\n", cov.sources_reporting));
     out.push_str(&format!("Sources gone silent:   {}\n", list_or_none(&cov.gone_silent)));
-    if cov.new_sources.is_empty() {
+    if cov.cold_start {
+        out.push_str(
+            "New sources:           \u{2014} (baseline not yet established — cold start, see below)\n",
+        );
+    } else if cov.new_sources.is_empty() {
         out.push_str("New sources:           \u{2014} (none)\n");
     } else {
         out.push_str(&format!(
@@ -99,6 +124,15 @@ fn render_coverage(out: &mut String, report: &DigestReport) {
         ));
     }
     out.push('\n');
+
+    if cov.cold_start {
+        out.push_str(
+            "COLD START: the baseline period predates the earliest data on disk — there is \
+             no real prior period to compare against yet, so \"new source\"/volume-delta flags \
+             are suppressed rather than firing for every source. This resolves itself once \
+             enough history accumulates (baseline window fully inside retained data).\n\n",
+        );
+    }
 
     out.push_str("Unparsed high-volume sources (>threshold events, _normalized: false):\n");
     if cov.unparsed_high_volume.is_empty() {
@@ -145,13 +179,14 @@ fn render_coverage(out: &mut String, report: &DigestReport) {
 
 fn render_volume(out: &mut String, report: &DigestReport) {
     let w = &report.window;
-    out.push_str(&format!(
-        "=== VOLUME ({} \u{2013} {} vs {} \u{2013} {}) ===\n\n",
-        fmt_hm(w.start),
-        fmt_hm(w.end),
-        fmt_hm(w.baseline_start),
-        fmt_hm(w.baseline_end),
-    ));
+    let [ws, we, bs, be] = fmt_header_times([w.start, w.end, w.baseline_start, w.baseline_end]);
+    out.push_str(&format!("=== VOLUME ({} \u{2013} {} vs {} \u{2013} {}) ===\n\n", ws, we, bs, be));
+    if report.coverage.cold_start {
+        out.push_str(
+            "(cold start — baseline predates the earliest data on disk; every baseline count \
+             below is 0 for that reason, not because these sources are actually new)\n\n",
+        );
+    }
     out.push_str(&format!("{:<14}{:>12}  {:>8}   delta\n", "source", "this window", "baseline"));
     for row in &report.volume {
         let delta = match (&row.flag, row.delta_pct) {
@@ -263,8 +298,9 @@ fn render_sparkline(
         .collect();
     out.push_str(&line);
     out.push('\n');
-    let pad = line.chars().count().saturating_sub(fmt_hm(start).len() + fmt_hm(end).len());
-    out.push_str(&format!("{}{}{}\n", fmt_hm(start), " ".repeat(pad), fmt_hm(end)));
+    let [s, e] = fmt_header_times([start, end]);
+    let pad = line.chars().count().saturating_sub(s.len() + e.len());
+    out.push_str(&format!("{}{}{}\n", s, " ".repeat(pad), e));
 }
 
 // ── 4. Auth ──────────────────────────────────────────────────────────────
@@ -415,9 +451,30 @@ fn render_notable(out: &mut String, report: &DigestReport) {
     }
 
     out.push_str("\nService restarts (systemd):\n");
-    if notable.service_restarts.is_empty() {
+    if notable.boot_storms.is_empty() && notable.service_restarts.is_empty() {
         out.push_str("  (none)\n");
     } else {
+        for s in &notable.boot_storms {
+            // Cap the inline unit list — the point of collapsing a storm is
+            // a one-line summary, not one row per unit with extra steps.
+            // The JSON renderer carries the full `units` list regardless.
+            const SHOWN: usize = 8;
+            let names: Vec<&str> = s.units.iter().take(SHOWN).map(String::as_str).collect();
+            let suffix = if s.units.len() > SHOWN {
+                format!(", + {} more", s.units.len() - SHOWN)
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "  {}  BOOT/SHUTDOWN STORM: {} units transitioned within {}s (last {}) \u{2014} {}{}\n",
+                fmt_opt_hm(s.first_seen),
+                s.unit_count,
+                BOOT_STORM_GAP_SECONDS,
+                fmt_opt_hm(s.last_seen),
+                names.join(", "),
+                suffix,
+            ));
+        }
         for r in &notable.service_restarts {
             out.push_str(&format!(
                 "  {}  {}: {}x transition(s) (first {}, last {})\n",

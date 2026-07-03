@@ -420,6 +420,44 @@ fn max_numeric_entry(dir: &Path, width: usize) -> Option<String> {
         .max()
 }
 
+/// Same as [`max_numeric_entry`] but smallest first — the earliest-data
+/// analog, used for cold-start detection (see [`earliest_raw_event_time`]).
+fn min_numeric_entry(dir: &Path, width: usize) -> Option<String> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.len() == width && n.chars().all(|c| c.is_ascii_digit()))
+        .min()
+}
+
+/// The instant of the *oldest* raw event on disk, found by descending into
+/// the lexicographically-smallest `YYYY/MM/DD/HH/MM/SS` path under
+/// `data_dir/raw`. Used to detect a cold-start baseline: if a digest's
+/// baseline window starts before data collection even began, comparing
+/// against it is comparing against nothing, not "quiet" — every source
+/// looks "new" because there's no real prior period to compare against.
+/// This naturally stops firing once retention has aged the raw tree's
+/// start point past any realistic baseline window (see
+/// implementation-plan.md 1.8, item 29 / 2.4's retention cadence).
+pub fn earliest_raw_event_time(data_dir: &Path) -> Option<DateTime<Utc>> {
+    let raw_root = data_dir.join("raw");
+    let year = min_numeric_entry(&raw_root, 4)?;
+    let dir = raw_root.join(&year);
+    let month = min_numeric_entry(&dir, 2)?;
+    let dir = dir.join(&month);
+    let day = min_numeric_entry(&dir, 2)?;
+    let dir = dir.join(&day);
+    let hour = min_numeric_entry(&dir, 2)?;
+    let dir = dir.join(&hour);
+    let minute = min_numeric_entry(&dir, 2)?;
+    let dir = dir.join(&minute);
+    let second = min_numeric_entry(&dir, 2)?;
+
+    time::parse_raw_file_time(&format!("raw/{year}/{month}/{day}/{hour}/{minute}/{second}/x"))
+}
+
 /// The instant of the most recent raw event on disk, found by descending
 /// into the lexicographically-largest `YYYY/MM/DD/HH/MM/SS` path under
 /// `data_dir/raw` — the "is the pipeline still receiving data at all" half
@@ -807,6 +845,23 @@ mod tests {
     fn latest_raw_event_time_none_when_missing() {
         let tmp = TempDir::new();
         assert_eq!(latest_raw_event_time(&tmp.path), None);
+    }
+
+    #[test]
+    fn earliest_raw_event_time_finds_shallowest_path() {
+        let tmp = TempDir::new();
+        touch_raw_file(&tmp.path, "raw/2026/06/29/17/22/09/openvpn.jsonl");
+        touch_raw_file(&tmp.path, "raw/2026/06/29/14/05/00/sshd.jsonl");
+        touch_raw_file(&tmp.path, "raw/2026/06/29/14/05/03/sshd.jsonl");
+
+        let earliest = earliest_raw_event_time(&tmp.path);
+        assert_eq!(earliest, Some(ymdhms(2026, 6, 29, 14, 5, 0)));
+    }
+
+    #[test]
+    fn earliest_raw_event_time_none_when_missing() {
+        let tmp = TempDir::new();
+        assert_eq!(earliest_raw_event_time(&tmp.path), None);
     }
 
     #[test]
