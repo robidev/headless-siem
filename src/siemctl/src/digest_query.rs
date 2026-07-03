@@ -338,6 +338,75 @@ pub fn raw_files_in_range(data_dir: &Path, win: &Window) -> Vec<PathBuf> {
     out
 }
 
+/// One hour bucket where the raw `.jsonl` line count exceeds what's
+/// actually indexed for that bucket — a completeness gap, not just staleness.
+#[derive(Debug, Clone)]
+pub struct BucketCompleteness {
+    pub bucket: String,
+    pub raw_count: u64,
+    pub indexed_count: u64,
+}
+
+/// Per-hour-bucket completeness check: raw `.jsonl` line count vs indexed
+/// row count, for every hour bucket overlapping `win`. Returns only buckets
+/// where the index is short — an index temporarily *ahead* of a raw file
+/// still mid-write is not a completeness problem and isn't flagged.
+///
+/// Deliberately independent of [`latest_raw_event_time`]/
+/// [`newest_indexed_event_time`] (the digest's existing lag check): that
+/// check only compares the *newest* timestamp on each side, so a bucket in
+/// the *middle* of the range that indexd silently missed (e.g. an inotify
+/// race on a freshly created deep directory chain, or an out-of-order/
+/// future event timestamp landing in a bucket indexd never watched in
+/// time) stays invisible to it as long as *later* buckets indexed fine —
+/// exactly the failure mode this function exists to catch.
+pub fn completeness_in_range(data_dir: &Path, win: &Window) -> Vec<BucketCompleteness> {
+    // Raw side: line-count every raw .jsonl file in range, grouped by hour bucket.
+    let mut raw_counts: BTreeMap<String, u64> = BTreeMap::new();
+    for path in raw_files_in_range(data_dir, win) {
+        let Ok(rel) = path.strip_prefix(data_dir) else { continue };
+        let Some(rel_str) = rel.to_str() else { continue };
+        let rel_str = rel_str.replace('\\', "/");
+        let Some(t) = time::parse_raw_file_time(&rel_str) else { continue };
+        let bucket = format!("{:04}-{:02}-{:02}-{:02}", t.year(), t.month(), t.day(), t.hour());
+        let lines = std::fs::read_to_string(&path).map(|s| s.lines().count() as u64).unwrap_or(0);
+        *raw_counts.entry(bucket).or_default() += lines;
+    }
+    if raw_counts.is_empty() {
+        return Vec::new();
+    }
+
+    // Indexed side: COUNT(*) scoped to the same [lo, hi) raw_file range used
+    // throughout this module, per hour-bucket db (a missing db file, or one
+    // that never picked up this bucket's rows, counts as 0 indexed).
+    let (lo, hi) = time::raw_file_range(win);
+    let idx_dir = data_dir.join("index");
+    let mut out = Vec::new();
+    for (bucket, raw_count) in raw_counts {
+        let db_path = idx_dir.join(format!("{bucket}.db"));
+        let indexed_count: u64 = if db_path.is_file() {
+            db::open_bucket_conn(&db_path, data_dir)
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM events WHERE raw_file >= ? AND raw_file < ?",
+                        [lo.as_str(), hi.as_str()],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .ok()
+                })
+                .map(|n| n as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if indexed_count < raw_count {
+            out.push(BucketCompleteness { bucket, raw_count, indexed_count });
+        }
+    }
+    out
+}
+
 /// Numerically-named subdirectories of `dir` with exactly `width` digits
 /// (e.g. `"08"` under an hour directory), as their raw names, largest first.
 /// Fixed-width zero-padded names sort correctly as plain strings.
@@ -763,5 +832,116 @@ mod tests {
     fn newest_indexed_event_time_none_without_index() {
         let tmp = TempDir::new();
         assert_eq!(newest_indexed_event_time(&tmp.path), None);
+    }
+
+    // ── completeness_in_range ────────────────────────────────────────────
+
+    fn write_raw_file(data_dir: &Path, rel_dir: &str, name: &str, lines: usize) {
+        let dir = data_dir.join(rel_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let content: String = (0..lines).map(|_| "{}\n").collect();
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn completeness_flags_bucket_with_no_index_at_all() {
+        let tmp = TempDir::new();
+        // 44 raw lines, matching the real-world gap this check exists for
+        // (implementation-plan.md 1.6) — no index/ dir at all yet.
+        write_raw_file(&tmp.path, "raw/2026/07/01/00/00/00", "sshd.jsonl", 44);
+
+        let win = Window { start: ymdhms(2026, 7, 1, 0, 0, 0), end: ymdhms(2026, 7, 1, 1, 0, 0) };
+        let gaps = completeness_in_range(&tmp.path, &win);
+
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].bucket, "2026-07-01-00");
+        assert_eq!(gaps[0].raw_count, 44);
+        assert_eq!(gaps[0].indexed_count, 0);
+    }
+
+    #[test]
+    fn completeness_flags_bucket_partially_indexed() {
+        let tmp = TempDir::new();
+        write_raw_file(&tmp.path, "raw/2026/07/01/00/00/00", "sshd.jsonl", 10);
+
+        let idx = tmp.path.join("index");
+        std::fs::create_dir_all(&idx).unwrap();
+        // Only 6 of the 10 raw lines made it into the index.
+        make_bucket(
+            &idx,
+            "2026-07-01-00.db",
+            &[
+                ("raw/2026/07/01/00/00/00/sshd.jsonl", "sshd"),
+                ("raw/2026/07/01/00/00/00/sshd.jsonl", "sshd"),
+                ("raw/2026/07/01/00/00/00/sshd.jsonl", "sshd"),
+                ("raw/2026/07/01/00/00/00/sshd.jsonl", "sshd"),
+                ("raw/2026/07/01/00/00/00/sshd.jsonl", "sshd"),
+                ("raw/2026/07/01/00/00/00/sshd.jsonl", "sshd"),
+            ],
+        );
+
+        let win = Window { start: ymdhms(2026, 7, 1, 0, 0, 0), end: ymdhms(2026, 7, 1, 1, 0, 0) };
+        let gaps = completeness_in_range(&tmp.path, &win);
+
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].raw_count, 10);
+        assert_eq!(gaps[0].indexed_count, 6);
+    }
+
+    #[test]
+    fn completeness_not_flagged_when_fully_indexed() {
+        let tmp = TempDir::new();
+        write_raw_file(&tmp.path, "raw/2026/07/01/00/00/00", "sshd.jsonl", 3);
+
+        let idx = tmp.path.join("index");
+        std::fs::create_dir_all(&idx).unwrap();
+        make_bucket(
+            &idx,
+            "2026-07-01-00.db",
+            &[
+                ("raw/2026/07/01/00/00/00/sshd.jsonl", "sshd"),
+                ("raw/2026/07/01/00/00/00/sshd.jsonl", "sshd"),
+                ("raw/2026/07/01/00/00/00/sshd.jsonl", "sshd"),
+            ],
+        );
+
+        let win = Window { start: ymdhms(2026, 7, 1, 0, 0, 0), end: ymdhms(2026, 7, 1, 1, 0, 0) };
+        assert!(completeness_in_range(&tmp.path, &win).is_empty());
+    }
+
+    #[test]
+    fn completeness_empty_when_no_raw_files() {
+        let tmp = TempDir::new();
+        let win = Window { start: ymdhms(2026, 7, 1, 0, 0, 0), end: ymdhms(2026, 7, 1, 1, 0, 0) };
+        assert!(completeness_in_range(&tmp.path, &win).is_empty());
+    }
+
+    #[test]
+    fn completeness_only_flags_the_gap_bucket_not_healthy_neighbors() {
+        let tmp = TempDir::new();
+        // Healthy bucket: 00:xx, fully indexed.
+        write_raw_file(&tmp.path, "raw/2026/07/01/00/05/00", "sshd.jsonl", 2);
+        // Gap bucket: 01:xx, never indexed — mirrors the real finding where
+        // *later* buckets indexed fine while one in the middle was missed.
+        write_raw_file(&tmp.path, "raw/2026/07/01/01/05/00", "sshd.jsonl", 5);
+
+        let idx = tmp.path.join("index");
+        std::fs::create_dir_all(&idx).unwrap();
+        make_bucket(
+            &idx,
+            "2026-07-01-00.db",
+            &[
+                ("raw/2026/07/01/00/05/00/sshd.jsonl", "sshd"),
+                ("raw/2026/07/01/00/05/00/sshd.jsonl", "sshd"),
+            ],
+        );
+
+        let win = Window { start: ymdhms(2026, 7, 1, 0, 0, 0), end: ymdhms(2026, 7, 1, 2, 0, 0) };
+        let gaps = completeness_in_range(&tmp.path, &win);
+
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].bucket, "2026-07-01-01");
+        assert_eq!(gaps[0].raw_count, 5);
+        assert_eq!(gaps[0].indexed_count, 0);
     }
 }

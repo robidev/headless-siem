@@ -157,6 +157,13 @@ pub struct UnparsedSource {
 }
 
 #[derive(Debug, Serialize)]
+pub struct IncompleteBucket {
+    pub bucket: String,
+    pub raw_count: u64,
+    pub indexed_count: u64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct CoverageSection {
     pub sources_reporting: usize,
     pub gone_silent: Vec<String>,
@@ -165,6 +172,11 @@ pub struct CoverageSection {
     pub latest_raw: Option<DateTime<Utc>>,
     pub latest_indexed: Option<DateTime<Utc>>,
     pub index_lag_seconds: Option<i64>,
+    /// Hour buckets in this window where the index is short of what's on
+    /// disk in raw — a completeness gap that `index_lag_seconds` (which
+    /// only compares the newest timestamp on each side) cannot see. See
+    /// `digest_query::completeness_in_range`'s doc comment.
+    pub incomplete_buckets: Vec<IncompleteBucket>,
 }
 
 pub fn build_coverage(data_dir: &Path, win: &Window, cfg: &DigestConfig) -> Result<CoverageSection> {
@@ -189,6 +201,15 @@ pub fn build_coverage(data_dir: &Path, win: &Window, cfg: &DigestConfig) -> Resu
         _ => None,
     };
 
+    let incomplete_buckets = digest_query::completeness_in_range(data_dir, win)
+        .into_iter()
+        .map(|b| IncompleteBucket {
+            bucket: b.bucket,
+            raw_count: b.raw_count,
+            indexed_count: b.indexed_count,
+        })
+        .collect();
+
     Ok(CoverageSection {
         sources_reporting: window_sources.len(),
         gone_silent,
@@ -197,6 +218,7 @@ pub fn build_coverage(data_dir: &Path, win: &Window, cfg: &DigestConfig) -> Resu
         latest_raw,
         latest_indexed,
         index_lag_seconds,
+        incomplete_buckets,
     })
 }
 
@@ -977,6 +999,38 @@ mod tests {
         assert_eq!(cov.latest_raw, Some(ymdhms(2026, 6, 29, 14, 27, 0)));
         assert_eq!(cov.latest_indexed, Some(ymdhms(2026, 6, 29, 14, 17, 0)));
         assert_eq!(cov.index_lag_seconds, Some(600));
+    }
+
+    #[test]
+    fn coverage_flags_incomplete_bucket_lag_check_alone_would_miss() {
+        let tmp = TempDir::new();
+        // No index/ dir at all — deliberately not using seed_fixture here:
+        // its rows are inserted directly into the DB with no matching raw
+        // files, and completeness compares per-bucket *totals*, so those
+        // phantom rows would mask the very gap this test wants to prove is
+        // caught. latest_raw/latest_indexed (the existing lag check) would
+        // report "no index yet" here — proving completeness is a genuinely
+        // independent signal, not a side effect of the lag check, since it
+        // still needs to name the exact bucket and counts.
+        let dir = tmp.path.join("raw/2026/06/29/14/50/00");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sshd.jsonl"), "{}\n{}\n{}\n").unwrap();
+
+        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default()).unwrap();
+        assert_eq!(cov.incomplete_buckets.len(), 1);
+        assert_eq!(cov.incomplete_buckets[0].bucket, "2026-06-29-14");
+        assert_eq!(cov.incomplete_buckets[0].raw_count, 3);
+        assert_eq!(cov.incomplete_buckets[0].indexed_count, 0);
+    }
+
+    #[test]
+    fn coverage_completeness_empty_when_nothing_written_to_raw() {
+        let tmp = TempDir::new();
+        seed_fixture(&tmp.path);
+        // seed_fixture only writes index rows, no raw files — completeness
+        // has nothing to compare against, so it must not false-positive.
+        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default()).unwrap();
+        assert!(cov.incomplete_buckets.is_empty());
     }
 
     // ── volume ───────────────────────────────────────────────────────────

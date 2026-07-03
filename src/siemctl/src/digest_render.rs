@@ -117,11 +117,28 @@ fn render_coverage(out: &mut String, report: &DigestReport) {
         (None, _) => "unknown (no raw data)".to_string(),
     };
     out.push_str(&format!(
-        "Index coverage:        {} (latest raw: {}, latest bucket: {})\n\n",
+        "Index coverage:        {} (latest raw: {}, latest bucket: {})\n",
         coverage_state,
         fmt_opt_hm(cov.latest_raw),
         fmt_opt_hm(cov.latest_indexed),
     ));
+
+    // "current" above only compares the newest timestamp on each side — it
+    // cannot see a gap in the middle of the range. This is that check:
+    // per-bucket raw-line-count vs indexed-row-count, independent of lag.
+    if cov.incomplete_buckets.is_empty() {
+        out.push_str("Index completeness:    complete (raw line counts match indexed row counts)\n\n");
+    } else {
+        out.push_str("Index completeness:    INCOMPLETE — raw events exist that were never indexed:\n");
+        for b in &cov.incomplete_buckets {
+            let missing = b.raw_count.saturating_sub(b.indexed_count);
+            out.push_str(&format!(
+                "  {}   {} raw, {} indexed ({} missing) — try: indexd --backfill {}\n",
+                b.bucket, b.raw_count, b.indexed_count, missing, b.bucket
+            ));
+        }
+        out.push('\n');
+    }
 }
 
 // ── 2. Volume ────────────────────────────────────────────────────────────

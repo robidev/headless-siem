@@ -20,6 +20,34 @@ const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
 /// coarse (see `IndexDb::evict_idle`).
 const IDLE_EVICT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How often the main loop re-scans raw files with a recent mtime, as a
+/// safety net against missed inotify events.
+///
+/// Recursive inotify watching has an inherent TOCTOU race for a brand-new,
+/// multi-level-deep directory chain created in one burst (`fs::create_dir_all`
+/// completes several `mkdir`s well inside a microsecond — potentially before
+/// this process even wakes from `poll()` to react to the *first* level's
+/// CREATE event and install a watch on it, at which point any child created
+/// in between is never observed by the kernel at all — nothing to catch up
+/// on later, the event simply never existed). The reactive
+/// watch-then-synchronously-scan handling in the main loop closes most of
+/// this window already, but not all of it, and there's no way to prove a
+/// negative from the event stream alone. This sweep is the actual fix:
+/// periodically re-scan anything touched recently by *wall-clock mtime*
+/// (deliberately not by the event-time bucket the file happens to be named
+/// after — a bucket can carry an out-of-order or future event timestamp,
+/// same root cause as the race above, and still have a very recent mtime).
+/// `scan_existing`'s `INSERT OR IGNORE` on `(raw_file, byte_offset)` makes
+/// re-scanning already-indexed files a cheap no-op, so this costs
+/// approximately nothing on a quiet system.
+const RECENT_FILE_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+
+/// How far back (by mtime) the recent-file sweep looks. Comfortably longer
+/// than the sweep interval itself so a file can't fall through a gap
+/// between two sweeps, and longer than any plausible reactive-watch
+/// catch-up delay.
+const RECENT_FILE_SWEEP_LOOKBACK: Duration = Duration::from_secs(900);
+
 /// How long a bucket connection can go without a write before eviction
 /// reclaims its WAL. An hour bucket goes quiet forever once its hour
 /// passes, so this just needs to be comfortably longer than any expected
@@ -113,6 +141,12 @@ fn print_help() {
     eprintln!("                      then exit. The boundary hour is cleared and re-indexed");
     eprintln!("                      to fix partial indexes. Falls back to --reindex-all");
     eprintln!("                      when no index exists yet.");
+    eprintln!("  --backfill <bucket> Clear and re-index one hour bucket (\"YYYY-MM-DD-HH\"),");
+    eprintln!("                      then exit. Unlike --reindex-new (which only covers the");
+    eprintln!("                      tail from the newest indexed bucket onward), this repairs");
+    eprintln!("                      a gap anywhere in the range — e.g. a bucket `siemctl");
+    eprintln!("                      digest`'s completeness check flagged as incomplete. Repeat");
+    eprintln!("                      the flag to backfill multiple buckets in one run.");
     eprintln!("  --no-watch          Index existing files then exit (do not watch for new");
     eprintln!("                      files). Useful for one-shot or cron-driven indexing.");
     eprintln!("  --help              Print this help message");
@@ -135,6 +169,22 @@ fn newest_indexed_bucket(index_dir: &Path) -> Option<String> {
             name.strip_suffix(".db").map(|s| s.to_string())
         })
         .max()
+}
+
+/// Parse a `"YYYY-MM-DD-HH"` bucket string into its four zero-padded
+/// components, for building a `raw/YYYY/MM/DD/HH` path. Returns `None` for
+/// anything that isn't exactly 4/2/2/2 ASCII digits in that shape — the
+/// same strictness `--backfill` needs to avoid silently no-op'ing on a typo.
+fn parse_bucket(s: &str) -> Option<(String, String, String, String)> {
+    let parts: Vec<&str> = s.split('-').collect();
+    let [y, mo, d, h] = parts.as_slice() else { return None };
+    let widths_ok = y.len() == 4 && mo.len() == 2 && d.len() == 2 && h.len() == 2;
+    let digits_ok = [*y, *mo, *d, *h].iter().all(|p| p.chars().all(|c| c.is_ascii_digit()));
+    if widths_ok && digits_ok {
+        Some((y.to_string(), mo.to_string(), d.to_string(), h.to_string()))
+    } else {
+        None
+    }
 }
 
 /// Delete `{bucket}.db`, `{bucket}.db-wal`, and `{bucket}.db-shm` from `index_dir`.
@@ -225,6 +275,7 @@ fn main() {
     let mut reindex_all = false;
     let mut reindex_new = false;
     let mut no_watch = false;
+    let mut backfill_buckets: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -242,6 +293,14 @@ fn main() {
             "--reindex-all" => reindex_all = true,
             "--reindex-new" => reindex_new = true,
             "--no-watch" => no_watch = true,
+            "--backfill" => {
+                if let Some(bucket) = args.next() {
+                    backfill_buckets.push(bucket);
+                } else {
+                    eprintln!("[indexd] --backfill requires a bucket argument (\"YYYY-MM-DD-HH\")");
+                    std::process::exit(1);
+                }
+            }
             "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -389,6 +448,53 @@ fn main() {
         std::process::exit(0);
     }
 
+    // ── Handle --backfill ────────────────────────────────────────────
+    // Repairs a gap anywhere in the range (unlike --reindex-new, which only
+    // covers the tail from the newest indexed bucket onward). Typical
+    // trigger: `siemctl digest`'s completeness check flags a specific
+    // "YYYY-MM-DD-HH" bucket as short of what's on disk in raw.
+    if !backfill_buckets.is_empty() {
+        let index_dir = data_dir.join("index");
+        let mut ok = true;
+        for bucket in &backfill_buckets {
+            let Some((y, mo, d, h)) = parse_bucket(bucket) else {
+                eprintln!(
+                    "[indexd] --backfill: invalid bucket '{}' (expected \"YYYY-MM-DD-HH\")",
+                    bucket
+                );
+                ok = false;
+                continue;
+            };
+            let hour_dir = raw_dir.join(&y).join(&mo).join(&d).join(&h);
+            if !hour_dir.is_dir() {
+                eprintln!(
+                    "[indexd] --backfill {}: no raw directory at {} — nothing to backfill \
+                     (data may be past retention)",
+                    bucket,
+                    hour_dir.display()
+                );
+                continue;
+            }
+            if let Err(e) = clear_bucket(&index_dir, bucket) {
+                eprintln!("[indexd] --backfill {}: failed to clear existing index: {}", bucket, e);
+                ok = false;
+                continue;
+            }
+            eprintln!("[indexd] backfilling bucket {} from {}", bucket, hour_dir.display());
+            let mut progress = ScanProgress::new();
+            scan_existing(&index_db, &hour_dir, &data_dir, &shutdown, &mut progress);
+            progress.finish();
+        }
+        index_db.close_all();
+        if ok {
+            eprintln!("[indexd] backfill complete ({} bucket(s))", backfill_buckets.len());
+            std::process::exit(0);
+        } else {
+            eprintln!("[indexd] backfill completed with errors");
+            std::process::exit(1);
+        }
+    }
+
     let watch_mask = WatchMask::CLOSE_WRITE | WatchMask::CREATE | WatchMask::MOVED_TO;
 
     // Maps every watch descriptor to the directory path it watches.
@@ -442,6 +548,7 @@ fn main() {
     let mut buffer = [0u8; 4096];
     let inotify_fd = inotify.as_raw_fd();
     let mut last_evict_sweep = Instant::now();
+    let mut last_recent_sweep = Instant::now();
 
     // ── Main event loop ──────────────────────────────────────────────
     while !shutdown.load(Ordering::Relaxed) {
@@ -473,6 +580,29 @@ fn main() {
                         );
                     }
                     last_evict_sweep = Instant::now();
+                }
+
+                // Recent-file reconciliation sweep — see RECENT_FILE_SWEEP_INTERVAL's
+                // doc comment for why this exists (inotify recursive-watch races on
+                // freshly created deep directory chains are unrecoverable at the
+                // event-stream level; this is the actual fix).
+                if last_recent_sweep.elapsed() >= RECENT_FILE_SWEEP_INTERVAL {
+                    let (files, events) = scan_recent(
+                        &index_db,
+                        &raw_dir,
+                        &data_dir,
+                        &shutdown,
+                        RECENT_FILE_SWEEP_LOOKBACK,
+                    );
+                    if files > 0 {
+                        eprintln!(
+                            "[indexd] recent-file sweep: checked {} file(s) modified in the last {}s, {} event(s) indexed (already-indexed lines are no-ops)",
+                            files,
+                            RECENT_FILE_SWEEP_LOOKBACK.as_secs(),
+                            events
+                        );
+                    }
+                    last_recent_sweep = Instant::now();
                 }
                 continue;
             }
@@ -576,6 +706,84 @@ fn scan_existing(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Re-scan `.jsonl` files under `dir` whose mtime is within `lookback` of
+/// now, indexing any lines not already present. Returns
+/// `(files_checked, events_indexed)`.
+///
+/// This is the periodic safety net described on [`RECENT_FILE_SWEEP_INTERVAL`]:
+/// scoped by *wall-clock mtime*, not by the event-time bucket a file is
+/// named after, so it still catches a file sitting in an out-of-order or
+/// future-dated bucket that the reactive inotify watcher missed. Cheap on a
+/// quiet system — `index_file`'s `INSERT OR IGNORE` on `(raw_file,
+/// byte_offset)` makes re-scanning an already-fully-indexed file a fast
+/// no-op, and this only walks files touched in the lookback window, not the
+/// whole raw tree.
+fn scan_recent(
+    index_db: &db::IndexDb,
+    dir: &Path,
+    data_dir: &Path,
+    shutdown: &AtomicBool,
+    lookback: Duration,
+) -> (usize, usize) {
+    let Some(cutoff) = std::time::SystemTime::now().checked_sub(lookback) else {
+        return (0, 0);
+    };
+    let mut files_checked = 0usize;
+    let mut events_indexed = 0usize;
+    walk_recent(index_db, dir, data_dir, shutdown, cutoff, &mut files_checked, &mut events_indexed);
+    (files_checked, events_indexed)
+}
+
+fn walk_recent(
+    index_db: &db::IndexDb,
+    dir: &Path,
+    data_dir: &Path,
+    shutdown: &AtomicBool,
+    cutoff: std::time::SystemTime,
+    files_checked: &mut usize,
+    events_indexed: &mut usize,
+) {
+    if shutdown.load(Ordering::Relaxed) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+
+        if path.is_dir() {
+            // A directory's mtime updates whenever an entry is added inside
+            // it — so a subtree with no *directory-level* changes since
+            // `cutoff` cannot contain a file created since `cutoff` either,
+            // and is safe to skip without descending. This is what keeps
+            // the sweep cheap as the raw tree grows over months: old
+            // year/month/day branches get pruned in O(1) per branch instead
+            // of walked in full, and only the handful of directories on the
+            // "hot" path (wherever normalized is actively writing) get
+            // descended into.
+            if meta.modified().map(|m| m >= cutoff).unwrap_or(true) {
+                walk_recent(index_db, &path, data_dir, shutdown, cutoff, files_checked, events_indexed);
+            }
+            continue;
+        }
+
+        if !path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            continue;
+        }
+        let Ok(mtime) = meta.modified() else { continue };
+        if mtime < cutoff {
+            continue;
+        }
+        *files_checked += 1;
+        if let Ok((indexed, _skipped)) = parser::index_file(index_db, &path, data_dir, 100) {
+            *events_indexed += indexed;
         }
     }
 }
@@ -738,6 +946,35 @@ mod tests {
 
         let count2 = clear_indexes(&tmp.path).unwrap();
         assert_eq!(count2, 0, "second clear should find nothing");
+    }
+
+    // ── parse_bucket ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_bucket_valid() {
+        assert_eq!(
+            parse_bucket("2026-07-01-00"),
+            Some(("2026".to_string(), "07".to_string(), "01".to_string(), "00".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_bucket_rejects_wrong_width() {
+        assert_eq!(parse_bucket("26-07-01-00"), None);
+        assert_eq!(parse_bucket("2026-7-01-00"), None);
+        assert_eq!(parse_bucket("2026-07-01-0"), None);
+    }
+
+    #[test]
+    fn parse_bucket_rejects_non_digits() {
+        assert_eq!(parse_bucket("2026-07-01-XX"), None);
+    }
+
+    #[test]
+    fn parse_bucket_rejects_wrong_shape() {
+        assert_eq!(parse_bucket("2026-07-01"), None);
+        assert_eq!(parse_bucket("2026-07-01-00-00"), None);
+        assert_eq!(parse_bucket(""), None);
     }
 
     // ── newest_indexed_bucket ─────────────────────────────────────────────
@@ -947,5 +1184,165 @@ mod tests {
             .collect();
 
         assert!(eligible.is_empty(), "no raw dirs → nothing to index");
+    }
+
+    // ── backfill (clear_bucket + scan_existing on one hour dir) ────────────
+
+    #[test]
+    fn backfill_indexes_a_bucket_with_no_prior_index() {
+        let tmp = TempDir::new();
+        let fields = vec![
+            "timestamp".to_string(), "source".to_string(),
+            "src_ip".to_string(), "byte_offset".to_string(), "raw_file".to_string(),
+        ];
+
+        // Simulates the real gap: raw events exist for an hour that was
+        // never indexed at all (no .db file for it). `leaf_dir` is the
+        // minute/second-level directory a raw file actually lives in;
+        // `--backfill` operates on the coarser YYYY/MM/DD/HH hour dir and
+        // relies on scan_existing's own recursion to reach files this deep.
+        let leaf_dir = tmp.path.join("raw/2026/07/01/00/00/00");
+        fs::create_dir_all(&leaf_dir).unwrap();
+        fs::write(
+            leaf_dir.join("sshd.jsonl"),
+            concat!(
+                "{\"timestamp\":\"2026-07-01T00:00:00Z\",\"src_ip\":\"10.0.0.1\",\"_source_type\":\"sshd\"}\n",
+                "{\"timestamp\":\"2026-07-01T00:00:01Z\",\"src_ip\":\"10.0.0.2\",\"_source_type\":\"sshd\"}\n",
+            ),
+        )
+        .unwrap();
+
+        let index_dir = tmp.path.join("index");
+        assert!(!index_dir.join("2026-07-01-00.db").exists());
+
+        // What `--backfill 2026-07-01-00` does, inline (main() exits the
+        // process, so the logic under test is exercised directly here).
+        let (y, mo, d, h) = parse_bucket("2026-07-01-00").unwrap();
+        let target = tmp.path.join("raw").join(&y).join(&mo).join(&d).join(&h);
+        assert!(leaf_dir.starts_with(&target), "leaf dir must live under the hour dir");
+
+        clear_bucket(&index_dir, "2026-07-01-00").unwrap(); // no-op, nothing to clear
+        let db = db::IndexDb::new(&tmp.path, &fields);
+        let shutdown = AtomicBool::new(false);
+        let mut progress = ScanProgress::new();
+        scan_existing(&db, &target, &tmp.path, &shutdown, &mut progress);
+        db.close_all();
+
+        let conn = rusqlite::Connection::open_with_flags(
+            index_dir.join("2026-07-01-00.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2, "both raw lines backfilled");
+    }
+
+    #[test]
+    fn backfill_is_idempotent_no_duplicate_rows() {
+        let tmp = TempDir::new();
+        let fields = vec![
+            "timestamp".to_string(), "source".to_string(),
+            "src_ip".to_string(), "byte_offset".to_string(), "raw_file".to_string(),
+        ];
+        let hour_dir = tmp.path.join("raw/2026/07/01/00/00/00");
+        fs::create_dir_all(&hour_dir).unwrap();
+        fs::write(
+            hour_dir.join("sshd.jsonl"),
+            "{\"timestamp\":\"2026-07-01T00:00:00Z\",\"src_ip\":\"10.0.0.1\",\"_source_type\":\"sshd\"}\n",
+        )
+        .unwrap();
+        let index_dir = tmp.path.join("index");
+
+        // Run the backfill sequence twice — clear_bucket + scan_existing —
+        // as would happen if an operator re-ran --backfill on a bucket that
+        // was already fixed.
+        for _ in 0..2 {
+            clear_bucket(&index_dir, "2026-07-01-00").unwrap();
+            let db = db::IndexDb::new(&tmp.path, &fields);
+            let shutdown = AtomicBool::new(false);
+            let mut progress = ScanProgress::new();
+            scan_existing(&db, &hour_dir, &tmp.path, &shutdown, &mut progress);
+            db.close_all();
+        }
+
+        let conn = rusqlite::Connection::open_with_flags(
+            index_dir.join("2026-07-01-00.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1, "re-running backfill must not duplicate rows");
+    }
+
+    // ── scan_recent ──────────────────────────────────────────────────────
+
+    #[test]
+    fn scan_recent_indexes_files_within_lookback() {
+        let tmp = TempDir::new();
+        let fields = vec![
+            "timestamp".to_string(), "source".to_string(),
+            "src_ip".to_string(), "byte_offset".to_string(), "raw_file".to_string(),
+        ];
+        let raw = tmp.path.join("raw/2099/01/01/00/00/00");
+        fs::create_dir_all(&raw).unwrap();
+        fs::write(
+            raw.join("sshd.jsonl"),
+            "{\"timestamp\":\"2099-01-01T00:00:00Z\",\"src_ip\":\"10.0.0.1\",\"_source_type\":\"sshd\"}\n",
+        )
+        .unwrap();
+
+        let db = db::IndexDb::new(&tmp.path, &fields);
+        let shutdown = AtomicBool::new(false);
+        let (files, events) =
+            scan_recent(&db, &tmp.path.join("raw"), &tmp.path, &shutdown, Duration::from_secs(3600));
+        db.close_all();
+
+        assert_eq!(files, 1, "the freshly written file is within the lookback window");
+        assert_eq!(events, 1);
+    }
+
+    #[test]
+    fn scan_recent_skips_files_older_than_lookback() {
+        let tmp = TempDir::new();
+        let fields = vec![
+            "timestamp".to_string(), "source".to_string(),
+            "src_ip".to_string(), "byte_offset".to_string(), "raw_file".to_string(),
+        ];
+        let raw = tmp.path.join("raw/2020/01/01/00/00/00");
+        fs::create_dir_all(&raw).unwrap();
+        let path = raw.join("sshd.jsonl");
+        fs::write(
+            &path,
+            "{\"timestamp\":\"2020-01-01T00:00:00Z\",\"src_ip\":\"10.0.0.1\",\"_source_type\":\"sshd\"}\n",
+        )
+        .unwrap();
+        // Back-date mtime well outside any lookback window this test uses.
+        let old = std::time::SystemTime::now() - Duration::from_secs(999_999);
+        filetime_set(&path, old);
+
+        let db = db::IndexDb::new(&tmp.path, &fields);
+        let shutdown = AtomicBool::new(false);
+        let (files, events) =
+            scan_recent(&db, &tmp.path.join("raw"), &tmp.path, &shutdown, Duration::from_secs(60));
+        db.close_all();
+
+        assert_eq!(files, 0, "an old-mtime file must be pruned before it's even opened");
+        assert_eq!(events, 0);
+    }
+
+    /// Minimal mtime-setter so the pruning test doesn't need a `filetime`
+    /// crate dependency just for one test — `utimensat` via `libc`, already
+    /// a dependency of this crate for the inotify poll loop.
+    fn filetime_set(path: &Path, t: std::time::SystemTime) {
+        let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap();
+        let spec = libc::timespec {
+            tv_sec: dur.as_secs() as libc::time_t,
+            tv_nsec: dur.subsec_nanos() as _,
+        };
+        let times = [spec, spec];
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        unsafe {
+            libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0);
+        }
     }
 }

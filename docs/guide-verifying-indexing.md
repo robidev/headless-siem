@@ -408,6 +408,50 @@ find data/raw/ -name "*.jsonl" | head -5
 3. Check that the bucket database exists: `ls data/index/`
 4. Try restarting `indexd` — it scans existing files on startup
 
+To check *systematically* rather than eyeballing one file at a time, use
+`siemctl digest`'s completeness check — it compares raw `.jsonl` line counts
+against indexed row counts per hour bucket over the digest's window, and is
+independent of the coverage section's "Index coverage: current/LAGGING"
+line (that only compares the *newest* timestamp on each side, so a gap in
+the *middle* of the range — a bucket that indexed 0 rows while everything
+after it caught up fine — stays invisible to it):
+
+```bash
+siemctl digest --data-dir ./data --window 72h
+# ...
+# Index coverage:        current (latest raw: 14:22, latest bucket: 14:22)
+# Index completeness:    INCOMPLETE — raw events exist that were never indexed:
+#   2026-07-01-00   44 raw, 0 indexed (44 missing) — try: indexd --backfill 2026-07-01-00
+```
+
+Fix a flagged bucket with `indexd --backfill <bucket>` — unlike
+`--reindex-new` (which only re-indexes the tail from the newest indexed
+bucket onward), this clears and re-scans one specific `YYYY-MM-DD-HH`
+bucket anywhere in the range, so it repairs a gap without a full
+`--reindex-all`:
+
+```bash
+indexd --data-dir ./data --backfill 2026-07-01-00
+# [indexd] backfilling bucket 2026-07-01-00 from data/raw/2026/07/01/00
+# [indexd] scan complete: 1 files, 44 events indexed, 0 skipped in 0.0s
+```
+
+Re-run `siemctl digest` to confirm the bucket now reads "complete". You can
+pass `--backfill` multiple times in one invocation to repair several
+buckets at once.
+
+**Why this class of gap happens at all:** a brand-new, multi-level-deep
+raw directory (e.g. the first event ever written into a new month) can be
+created by `normalized` faster than `indexd`'s reactive inotify watcher
+reacts to the first level and installs a watch on it — any child directory
+created in that window generates no inotify event at all, at the kernel
+level, and there's nothing to "catch up on" later from the event stream.
+`indexd` also runs a periodic background reconciliation sweep (every 5
+minutes, scoped to files with a recent mtime) specifically to self-heal
+this — `--backfill` is the manual/targeted version of the same repair for
+when you don't want to wait for the next sweep, or the gap is old enough
+that its mtime has aged out of the sweep's lookback window.
+
 ### Schema mismatch after changing index_fields
 
 If you add a field to `index_fields` and restart `indexd`, **existing bucket databases won't get the new column automatically**. Options:
@@ -443,6 +487,10 @@ indexd --data-dir ./data --config ./config/sources.toml
 
 # With environment variable
 HEADLESS_SIEM_ROOT=/path/to/project indexd --data-dir ./data
+
+# Repair one hour bucket flagged by `siemctl digest`'s completeness check
+# (can be repeated to backfill several buckets in one run)
+indexd --data-dir ./data --backfill 2026-07-01-00
 ```
 
 ### Schema Inspection
