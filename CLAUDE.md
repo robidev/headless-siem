@@ -40,7 +40,7 @@ rsyslog ──omprog──→ normalized → data/raw/YYYY/MM/DD/HH/MM/SS/<sourc
                        │
                   ruled (Sigma) → data/alerts/YYYY/MM/DD/HH/alerts.jsonl
                        │
-                  correlated → data/alerts/correlated/YYYY/MM/DD/correlated.jsonl
+                  correlated → data/alerts/correlated/YYYY/MM/DD/HH/correlated.jsonl
 ```
 
 `siemctl` (Rust) is a standalone search/status CLI that reads from the filesystem.
