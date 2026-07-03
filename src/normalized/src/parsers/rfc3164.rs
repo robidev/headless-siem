@@ -91,11 +91,30 @@ fn try_parse_timestamp(s: &str) -> Option<(String, &str)> {
 }
 
 /// Split `sshd[1234]: message` → (Some("sshd"), Some("1234"), "message")
+///
+/// A real TAG is a single token — some daemons don't follow the TAG
+/// convention at all and emit free text directly after the hostname (seen
+/// live: `firmware-updater.firmware-notifi Failed to load module: /path`,
+/// where the naive "first colon ends the tag" rule swallowed five words of
+/// message text into the tag). If whitespace appears before the tag's
+/// terminator (`[` or `:`), there is no tag — the whole remainder is message.
 fn parse_tag_and_msg(s: &str) -> (Option<String>, Option<String>, String) {
     // Find the first `:` which conventionally ends the tag
     let colon = s.find(':');
     // Find `[pid]` if present before the colon
     let bracket = s.find('[');
+
+    if let Some(sp) = s.find(char::is_whitespace) {
+        let terminator = match (bracket, colon) {
+            (Some(b), Some(c)) => Some(b.min(c)),
+            (Some(b), None) => Some(b),
+            (None, Some(c)) => Some(c),
+            (None, None) => None,
+        };
+        if terminator.map_or(true, |t| sp < t) {
+            return (None, None, s.to_owned());
+        }
+    }
 
     match (bracket, colon) {
         (Some(b), Some(c)) if b < c => {
@@ -112,5 +131,63 @@ fn parse_tag_and_msg(s: &str) -> (Option<String>, Option<String>, String) {
             (Some(app), None, msg)
         }
         _ => (None, None, s.to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_and_pid() {
+        let (app, pid, msg) = parse_tag_and_msg("sshd[1234]: Failed password");
+        assert_eq!(app.as_deref(), Some("sshd"));
+        assert_eq!(pid.as_deref(), Some("1234"));
+        assert_eq!(msg, "Failed password");
+    }
+
+    #[test]
+    fn tag_no_pid() {
+        let (app, pid, msg) = parse_tag_and_msg("CRON: some command ran");
+        assert_eq!(app.as_deref(), Some("CRON"));
+        assert_eq!(pid, None);
+        assert_eq!(msg, "some command ran");
+    }
+
+    #[test]
+    fn tagless_line_with_no_colon_or_bracket_before_whitespace() {
+        // Seen live: a daemon that doesn't follow the TAG convention at
+        // all. The naive "first colon ends the tag" rule used to swallow
+        // "firmware-updater.firmware-notifi Failed to load module" whole
+        // into app_name, producing the source label
+        // "firmware-updater.firmware-notifi_Failed_to_load_module".
+        let (app, pid, msg) = parse_tag_and_msg(
+            "firmware-updater.firmware-notifi Failed to load module: /path/to/lib.so",
+        );
+        assert_eq!(app, None, "a 'tag' containing whitespace is not a real tag");
+        assert_eq!(pid, None);
+        assert_eq!(msg, "firmware-updater.firmware-notifi Failed to load module: /path/to/lib.so");
+    }
+
+    #[test]
+    fn tagless_line_with_no_terminator_at_all() {
+        let (app, pid, msg) = parse_tag_and_msg("just a plain sentence with no tag");
+        assert_eq!(app, None);
+        assert_eq!(pid, None);
+        assert_eq!(msg, "just a plain sentence with no tag");
+    }
+
+    #[test]
+    fn malformed_stray_closing_bracket_still_parses_as_a_tag() {
+        // Seen live: a truncated/malformed tag missing its opening `[`
+        // (`gdm-password]: message` instead of `gdm-password[123]: message`).
+        // No whitespace precedes the colon, so this is still treated as a
+        // (malformed) tag rather than tag-less text — the stray `]` gets
+        // cleaned up downstream by `sanitize_source` trimming, not here.
+        let (app, pid, msg) =
+            parse_tag_and_msg("gdm-password]: gkr-pam: unlocked login keyring");
+        assert_eq!(app.as_deref(), Some("gdm-password]"));
+        assert_eq!(pid, None);
+        assert_eq!(msg, "gkr-pam: unlocked login keyring");
     }
 }

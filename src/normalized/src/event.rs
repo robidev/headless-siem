@@ -41,6 +41,22 @@ impl Format {
             Format::Plain      => "plain",
         }
     }
+
+    /// True for wire formats that are themselves the identity of the
+    /// source — their parsers never populate `app_name` at all (there's no
+    /// separate "which app wrote this" concept to extract), so falling
+    /// back to the format name in [`Event::derive_source`] is correct by
+    /// design rather than a loss of information.
+    ///
+    /// False for syslog-envelope formats that *wrap* an arbitrary
+    /// application (rfc3164, rfc5424, cef, leef, logfmt, json, xml, yaml):
+    /// for these, a missing `app_name` means the wrapped app's identity
+    /// failed to parse, and using the format name would silently merge
+    /// events from many unrelated apps into one meaningless bucket (seen
+    /// live: a truncated snapd tag producing a literal `rfc3164` source).
+    pub fn self_describing(&self) -> bool {
+        matches!(self, Format::Filterlog | Format::Csv | Format::Plain)
+    }
 }
 
 /// Syslog severity (RFC 5424 §6.2.1)
@@ -145,17 +161,39 @@ pub struct Event {
 
 impl Event {
     /// Derive the source label used for both the bucket filename and the
-    /// `_source_type` field: explicit override → syslog app_name → format.
+    /// `_source_type` field: explicit override → syslog app_name → hostname
+    /// → format name (only for formats whose identity *is* the wire format,
+    /// e.g. filterlog; see [`Format::self_describing`]) → `"unknown"`.
     /// `override_source` carries the CLI `--source` value or a matching
     /// override rule's `source` (already resolved by the caller, CLI first).
     /// The result is sanitized for safe use as a path component.
+    ///
+    /// Known same-daemon case variants (e.g. Debian cron's `CRON` vs the
+    /// lowercase convention every other source uses) are folded upstream by
+    /// `canonical_app_name` in `main.rs`, before `app_name` ever reaches
+    /// here — deliberately an explicit allowlist rather than a blanket
+    /// lowercase, so legitimately mixed-case service names (NetworkManager,
+    /// PackageKit, ...) aren't cosmetically mangled without cause.
+    ///
+    /// `app_name` itself is never rewritten here — only the label derived
+    /// from it. See `flatten()`, which always includes the raw `app_name`
+    /// field unchanged.
     pub fn derive_source(&self, override_source: Option<&str>) -> String {
         let candidate = override_source
             .filter(|s| !s.trim().is_empty())
-            .or(self.app_name.as_deref().filter(|s| !s.trim().is_empty()))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| self.format.as_str().to_string());
-        sanitize_source(&candidate)
+            .or(self.app_name.as_deref().filter(|s| !s.trim().is_empty()));
+
+        let resolved = match candidate {
+            Some(s) => s.trim().to_string(),
+            None if self.format.self_describing() => self.format.as_str().to_string(),
+            None => self
+                .hostname
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        };
+        sanitize_source(&resolved)
     }
 
     /// Flatten this event into the downstream-compatible schema: a sorted
@@ -273,8 +311,13 @@ fn synonym_target(key: &str) -> Option<&'static str> {
 }
 
 /// Sanitize a source label for safe use as a filesystem path component.
-/// Allows `[A-Za-z0-9._-]`; everything else becomes `_`. Pure-dot or empty
-/// results collapse to `"unknown"`.
+/// Allows `[A-Za-z0-9._-]`; everything else becomes `_`. Leading/trailing
+/// runs of the `_` substitution character are then trimmed — a tag wrapped
+/// in punctuation (seen live: `(sd-pam)`, or a truncated `gdm-password]`
+/// tag missing its opening bracket) would otherwise sanitize to
+/// `_sd-pam_`/`gdm-password_`, polluting the source list with a
+/// least-effort variant of the same daemon's real name. Pure-dot,
+/// pure-underscore, or empty results collapse to `"unknown"`.
 fn sanitize_source(s: &str) -> String {
     let cleaned: String = s
         .chars()
@@ -286,10 +329,11 @@ fn sanitize_source(s: &str) -> String {
             }
         })
         .collect();
-    if cleaned.is_empty() || cleaned.chars().all(|c| c == '.') {
+    let trimmed = cleaned.trim_matches('_');
+    if trimmed.is_empty() || trimmed.chars().all(|c| c == '.') {
         "unknown".to_string()
     } else {
-        cleaned
+        trimmed.to_string()
     }
 }
 
@@ -336,18 +380,80 @@ mod tests {
     }
 
     #[test]
-    fn derive_source_prefers_override_then_app_name_then_format() {
+    fn derive_source_prefers_override_then_app_name_then_hostname() {
         let mut ev = base_event();
         assert_eq!(ev.derive_source(None), "sshd"); // app_name
         assert_eq!(ev.derive_source(Some("pfsense")), "pfsense"); // override wins
         ev.app_name = None;
-        assert_eq!(ev.derive_source(None), "rfc3164"); // format fallback
+        // rfc3164 is not self-describing (it wraps an arbitrary app), so a
+        // missing app_name falls back to hostname, never the format name.
+        assert_eq!(ev.derive_source(None), "myhost");
+    }
+
+    #[test]
+    fn derive_source_falls_back_to_unknown_when_nothing_identifies_the_source() {
+        let mut ev = base_event();
+        ev.app_name = None;
+        ev.hostname = None;
+        assert_eq!(ev.derive_source(None), "unknown");
+    }
+
+    #[test]
+    fn derive_source_uses_format_name_for_self_describing_formats() {
+        // filterlog/csv/plain never populate app_name by design — the
+        // format name *is* the source identity for these, so the fallback
+        // there is correct rather than a "format name leaked in" bug.
+        let mut ev = base_event();
+        ev.format = Format::Filterlog;
+        ev.app_name = None;
+        ev.hostname = None;
+        assert_eq!(ev.derive_source(None), "filterlog");
+    }
+
+    #[test]
+    fn derive_source_does_not_leak_format_name_for_wrapper_formats() {
+        // The bug this guards: a truncated/unparseable tag in a syslog
+        // envelope format used to fall back to the format name itself
+        // (e.g. a literal "rfc3164" source polluting the source list).
+        for format in [Format::Rfc3164, Format::Rfc5424, Format::Cef, Format::Leef,
+                        Format::Logfmt, Format::Json, Format::Xml, Format::Yaml] {
+            let mut ev = base_event();
+            ev.format = format.clone();
+            ev.app_name = None;
+            ev.hostname = None;
+            assert_eq!(
+                ev.derive_source(None),
+                "unknown",
+                "{:?} must not fall back to its own format name",
+                format
+            );
+        }
     }
 
     #[test]
     fn derive_source_sanitizes_path_separators() {
         let ev = base_event();
         assert_eq!(ev.derive_source(Some("../etc/passwd")), ".._etc_passwd");
+    }
+
+    #[test]
+    fn derive_source_trims_punctuation_wrapped_tags() {
+        // Seen live: systemd-logind's "(sd-pam)" pseudo-tag sanitizing to
+        // "_sd-pam_" (parens -> underscores, then left in place at the
+        // edges) instead of the much more legible "sd-pam".
+        let mut ev = base_event();
+        ev.app_name = Some("(sd-pam)".into());
+        assert_eq!(ev.derive_source(None), "sd-pam");
+    }
+
+    #[test]
+    fn derive_source_trims_stray_trailing_bracket() {
+        // Seen live: a truncated tag missing its opening `[`
+        // ("gdm-password]: message" instead of "gdm-password[123]: message")
+        // sanitizing to "gdm-password_" instead of "gdm-password".
+        let mut ev = base_event();
+        ev.app_name = Some("gdm-password]".into());
+        assert_eq!(ev.derive_source(None), "gdm-password");
     }
 
     #[test]
