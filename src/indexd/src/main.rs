@@ -14,6 +14,18 @@ use std::time::{Duration, Instant};
 /// How often the initial scan logs an aggregate progress line.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How often the main loop checks for idle bucket connections to evict.
+/// Piggybacks on the existing inotify poll timeout, so this is a lower
+/// bound, not a guarantee — fine, since eviction timing only needs to be
+/// coarse (see `IndexDb::evict_idle`).
+const IDLE_EVICT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long a bucket connection can go without a write before eviction
+/// reclaims its WAL. An hour bucket goes quiet forever once its hour
+/// passes, so this just needs to be comfortably longer than any expected
+/// gap in live traffic — 15 minutes.
+const IDLE_EVICT_AFTER: Duration = Duration::from_secs(15 * 60);
+
 /// Running totals for an initial/reindex scan, with throttled progress logging.
 ///
 /// The scan touches one tiny `.jsonl` file per second-bucket (thousands of
@@ -429,6 +441,7 @@ fn main() {
     // ── Buffer for inotify events ────────────────────────────────────
     let mut buffer = [0u8; 4096];
     let inotify_fd = inotify.as_raw_fd();
+    let mut last_evict_sweep = Instant::now();
 
     // ── Main event loop ──────────────────────────────────────────────
     while !shutdown.load(Ordering::Relaxed) {
@@ -445,6 +458,22 @@ fn main() {
                     revents: 0,
                 };
                 unsafe { libc::poll(&mut pfd, 1, 200) };
+
+                // Idle bucket eviction rides the same poll timeout — this
+                // branch is where the loop actually sits most of the time
+                // for a homelab-volume SIEM, which is exactly when quiet
+                // hour buckets need their WAL reclaimed.
+                if last_evict_sweep.elapsed() >= IDLE_EVICT_SWEEP_INTERVAL {
+                    let evicted = index_db.evict_idle(IDLE_EVICT_AFTER);
+                    if !evicted.is_empty() {
+                        eprintln!(
+                            "[indexd] evicted {} idle bucket connection(s) (WAL checkpointed): {:?}",
+                            evicted.len(),
+                            evicted
+                        );
+                    }
+                    last_evict_sweep = Instant::now();
+                }
                 continue;
             }
             Err(e) => {

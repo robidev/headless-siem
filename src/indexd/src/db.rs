@@ -2,6 +2,25 @@ use rusqlite::{Connection, params_from_iter};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// A cached bucket connection plus the last time it was written to.
+///
+/// `last_write` drives `evict_idle`'s decision to close (and checkpoint) a
+/// connection that has gone quiet — see that method's doc comment for why
+/// this exists. `Deref`s to `Connection` so callers (including tests) can
+/// use a `&BucketConn` exactly like a `&Connection` for read-only access.
+pub(crate) struct BucketConn {
+    conn: Connection,
+    last_write: Instant,
+}
+
+impl std::ops::Deref for BucketConn {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
 
 /// Manages per-bucket SQLite index databases.
 ///
@@ -14,6 +33,13 @@ use std::sync::Mutex;
 /// `index_fields` declared in `config/sources.toml`. This means
 /// adding a new field to `index_fields` in sources.toml and
 /// restarting indexd is all that's needed to index it.
+///
+/// Connections stay open (WAL mode) across inserts for the life of an hour
+/// bucket, but a bucket goes permanently quiet once its hour passes — with
+/// nothing left to trigger SQLite's own auto-checkpoint, a stale bucket's
+/// final WAL (observed ~3-4 MB, right at the 1000-page auto-checkpoint
+/// threshold) would otherwise sit on disk until the process exits. The
+/// caller is expected to periodically call `evict_idle` to reclaim these.
 pub struct IndexDb {
     /// Base directory for index files (e.g. `data/index/`).
     index_dir: PathBuf,
@@ -21,8 +47,9 @@ pub struct IndexDb {
     index_fields: Vec<String>,
     /// Pre-computed INSERT statement for efficiency.
     insert_sql: String,
-    /// Cache of open connections, keyed by bucket path.
-    pub(crate) connections: Mutex<HashMap<String, Connection>>,
+    /// Cache of open connections, keyed by bucket path. Idle entries are
+    /// reclaimed by `evict_idle`.
+    pub(crate) connections: Mutex<HashMap<String, BucketConn>>,
 }
 
 impl IndexDb {
@@ -100,7 +127,11 @@ impl IndexDb {
     ///
     /// Creates the schema dynamically from `index_fields` if this
     /// is the first time the bucket is opened. Every field gets a
-    /// TEXT column and a corresponding index.
+    /// TEXT column and a corresponding index. If the bucket's `.db` file
+    /// already exists from a previous process lifetime with a narrower
+    /// schema (e.g. `sources.toml` gained a field since it was created),
+    /// any columns it's missing are added via `ALTER TABLE` — see the
+    /// comment at that step for why this matters beyond tidiness.
     ///
     /// Returns the bucket key used for subsequent operations.
     pub fn open_bucket(&self, bucket: &str) -> Result<String, rusqlite::Error> {
@@ -148,6 +179,42 @@ impl IndexDb {
         );
         conn.execute_batch(&create_table)?;
 
+        // Migrate: CREATE TABLE IF NOT EXISTS above is a no-op for a bucket
+        // file left over from before a field was added to index_fields, so
+        // without this, every insert into that bucket hard-fails with
+        // "no such column" — not just noisy for a historical rescan, but a
+        // real ongoing indexing failure for the current hour's bucket if it
+        // was created earlier in this same process's uptime, before a
+        // config reload picked up the new field. Add whatever columns are
+        // missing; existing rows get the same default a fresh CREATE TABLE
+        // would have used. This does not backfill real historical values
+        // for the new field into already-indexed rows — that still needs
+        // `--reindex-new`/`--reindex-all`.
+        let mut stmt = conn.prepare("PRAGMA table_info(events)")?;
+        let existing_columns: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        for field in &self.index_fields {
+            if existing_columns.contains(field) {
+                continue;
+            }
+            let column_def = if field == "byte_offset" {
+                format!("{} INTEGER NOT NULL DEFAULT 0", field)
+            } else {
+                format!("{} TEXT NOT NULL DEFAULT ''", field)
+            };
+            if let Err(e) =
+                conn.execute_batch(&format!("ALTER TABLE events ADD COLUMN {}", column_def))
+            {
+                eprintln!(
+                    "[indexd] failed to add column '{}' to bucket {}: {}",
+                    field, bucket, e
+                );
+            }
+        }
+
         // Create an index for every field (except byte_offset)
         for field in &self.index_fields {
             if field == "byte_offset" {
@@ -164,7 +231,10 @@ impl IndexDb {
         }
 
         let mut connections = self.connections.lock().unwrap();
-        connections.insert(bucket_key.clone(), conn);
+        connections.insert(
+            bucket_key.clone(),
+            BucketConn { conn, last_write: Instant::now() },
+        );
 
         Ok(bucket_key)
     }
@@ -185,11 +255,11 @@ impl IndexDb {
         }
 
         let mut connections = self.connections.lock().unwrap();
-        let conn = connections.get_mut(bucket_key).ok_or_else(|| {
+        let entry = connections.get_mut(bucket_key).ok_or_else(|| {
             rusqlite::Error::InvalidParameterName(format!("bucket not open: {}", bucket_key))
         })?;
 
-        let tx = conn.transaction()?;
+        let tx = entry.conn.transaction()?;
         {
             let mut stmt = tx.prepare_cached(&self.insert_sql)?;
             for fields in batch {
@@ -202,13 +272,51 @@ impl IndexDb {
             }
         }
         tx.commit()?;
+        entry.last_write = Instant::now();
 
         Ok(())
     }
 
+    /// Close connections that haven't been written to in at least `idle_after`.
+    ///
+    /// Runs an explicit `PRAGMA wal_checkpoint(TRUNCATE)` before dropping
+    /// each idle connection, so its WAL is reclaimed immediately instead of
+    /// relying on SQLite's own close-time checkpoint (which never runs at
+    /// all here otherwise — a bucket that has gone quiet for the rest of
+    /// its life has nothing left to trigger an auto-checkpoint). A checkpoint
+    /// failure is logged and the connection is dropped anyway; a late event
+    /// for that bucket just re-opens it via `open_bucket`. Returns the
+    /// bucket keys that were evicted, for logging.
+    pub fn evict_idle(&self, idle_after: Duration) -> Vec<String> {
+        let now = Instant::now();
+        let mut connections = self.connections.lock().unwrap();
+        let idle_keys: Vec<String> = connections
+            .iter()
+            .filter(|(_, entry)| now.duration_since(entry.last_write) >= idle_after)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in &idle_keys {
+            if let Some(entry) = connections.get(key) {
+                if let Err(e) = entry.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                    eprintln!("[indexd] checkpoint failed for idle bucket {}: {}", key, e);
+                }
+            }
+            connections.remove(key);
+        }
+
+        idle_keys
+    }
+
     /// Close all open connections gracefully.
+    ///
+    /// Checkpoints each bucket's WAL first (same as `evict_idle`), so a
+    /// clean shutdown never leaves a stranded WAL file behind either.
     pub fn close_all(&self) {
         let mut connections = self.connections.lock().unwrap();
+        for entry in connections.values() {
+            let _ = entry.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
         connections.clear();
     }
 }
@@ -406,6 +514,105 @@ mod tests {
     }
 
     #[test]
+    fn test_evict_idle_leaves_fresh_connections_open() {
+        let tmp = TempDir::new();
+        let fields = default_fields();
+        let db = IndexDb::new(&tmp.path, &fields);
+        let key = db.open_bucket("2026/06/22/08").unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("timestamp".to_string(), "Jun 22 08:55:03".to_string());
+        event.insert("byte_offset".to_string(), "0".to_string());
+        db.insert_batch(&key, &[event]).unwrap();
+
+        // Just wrote — nowhere near idle for a 1-hour threshold.
+        let evicted = db.evict_idle(Duration::from_secs(3600));
+        assert!(evicted.is_empty(), "fresh bucket should not be evicted");
+        assert!(db.connections.lock().unwrap().contains_key(&key));
+
+        db.close_all();
+    }
+
+    #[test]
+    fn test_evict_idle_checkpoints_truncates_wal_and_preserves_data() {
+        let tmp = TempDir::new();
+        let fields = default_fields();
+        let db = IndexDb::new(&tmp.path, &fields);
+        let key = db.open_bucket("2026/06/22/08").unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("timestamp".to_string(), "Jun 22 08:55:03".to_string());
+        event.insert("src_ip".to_string(), "10.0.0.5".to_string());
+        event.insert("byte_offset".to_string(), "0".to_string());
+        db.insert_batch(&key, &[event]).unwrap();
+
+        let wal_path = tmp.path.join("index").join("2026-06-22-08.db-wal");
+        assert!(wal_path.exists(), "WAL-mode SQLite should create a -wal file on first write");
+
+        // Zero threshold: any elapsed time (even microseconds) qualifies —
+        // deterministic without sleeping.
+        let evicted = db.evict_idle(Duration::from_secs(0));
+        assert_eq!(evicted, vec![key.clone()]);
+        assert!(
+            !db.connections.lock().unwrap().contains_key(&key),
+            "connection should be dropped after eviction"
+        );
+
+        if wal_path.exists() {
+            let len = std::fs::metadata(&wal_path).unwrap().len();
+            assert_eq!(len, 0, "checkpoint(TRUNCATE) should shrink the WAL to empty");
+        }
+
+        // Data survives: re-opening the bucket sees the same row, not a
+        // fresh empty table.
+        let key2 = db.open_bucket("2026/06/22/08").unwrap();
+        assert_eq!(key2, key, "bucket key is stable across evict + reopen");
+        {
+            let connections = db.connections.lock().unwrap();
+            let conn = connections.get(&key2).unwrap();
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "data must survive eviction + reopen");
+        }
+
+        db.close_all();
+    }
+
+    #[test]
+    fn test_evict_idle_only_evicts_buckets_past_threshold() {
+        let tmp = TempDir::new();
+        let fields = default_fields();
+        let db = IndexDb::new(&tmp.path, &fields);
+
+        let key_old = db.open_bucket("2026/06/22/08").unwrap();
+        let mut e1 = HashMap::new();
+        e1.insert("timestamp".to_string(), "Jun 22 08:00:00".to_string());
+        e1.insert("byte_offset".to_string(), "0".to_string());
+        db.insert_batch(&key_old, &[e1]).unwrap();
+
+        std::thread::sleep(Duration::from_millis(150));
+
+        let key_fresh = db.open_bucket("2026/06/22/09").unwrap();
+        let mut e2 = HashMap::new();
+        e2.insert("timestamp".to_string(), "Jun 22 09:00:00".to_string());
+        e2.insert("byte_offset".to_string(), "0".to_string());
+        db.insert_batch(&key_fresh, &[e2]).unwrap();
+
+        // Threshold sits between the two writes: only the older bucket
+        // qualifies.
+        let evicted = db.evict_idle(Duration::from_millis(75));
+        assert_eq!(evicted, vec![key_old.clone()]);
+
+        let connections = db.connections.lock().unwrap();
+        assert!(!connections.contains_key(&key_old), "old bucket should be evicted");
+        assert!(connections.contains_key(&key_fresh), "fresh bucket should remain open");
+        drop(connections);
+
+        db.close_all();
+    }
+
+    #[test]
     fn test_insert_event_missing_fields_become_empty() {
         let tmp = TempDir::new();
         let fields = default_fields();
@@ -570,5 +777,81 @@ mod tests {
         }
 
         db.close_all();
+    }
+
+    #[test]
+    fn test_open_bucket_migrates_missing_columns_for_existing_file() {
+        let tmp = TempDir::new();
+
+        // First "process lifetime": narrow schema, no `username` field.
+        let narrow_fields = vec![
+            "timestamp".to_string(),
+            "source".to_string(),
+            "src_ip".to_string(),
+            "byte_offset".to_string(),
+            "raw_file".to_string(),
+        ];
+        {
+            let db = IndexDb::new(&tmp.path, &narrow_fields);
+            let key = db.open_bucket("2026/06/22/08").unwrap();
+            let mut old_event = HashMap::new();
+            old_event.insert("timestamp".to_string(), "Jun 22 08:00:00".to_string());
+            old_event.insert("src_ip".to_string(), "10.0.0.1".to_string());
+            old_event.insert("byte_offset".to_string(), "0".to_string());
+            old_event.insert("raw_file".to_string(), "raw/old.jsonl".to_string());
+            db.insert_batch(&key, &[old_event]).unwrap();
+            db.close_all();
+        }
+
+        // Second "process lifetime" (simulates a restart after sources.toml
+        // gained a new field): wider schema, same on-disk bucket file.
+        let mut wide_fields = narrow_fields.clone();
+        wide_fields.push("username".to_string());
+        let db2 = IndexDb::new(&tmp.path, &wide_fields);
+        let key2 = db2.open_bucket("2026/06/22/08").unwrap();
+
+        // Migration must have added the missing column — a fresh insert
+        // using it must succeed (previously this hard-failed with
+        // "no such column").
+        let mut new_event = HashMap::new();
+        new_event.insert("timestamp".to_string(), "Jun 22 08:05:00".to_string());
+        new_event.insert("src_ip".to_string(), "10.0.0.2".to_string());
+        new_event.insert("username".to_string(), "root".to_string());
+        new_event.insert("byte_offset".to_string(), "50".to_string());
+        new_event.insert("raw_file".to_string(), "raw/new.jsonl".to_string());
+        db2.insert_batch(&key2, &[new_event])
+            .expect("insert using a newly migrated column must succeed");
+
+        let connections = db2.connections.lock().unwrap();
+        let conn = connections.get(&key2).unwrap();
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "both the pre- and post-migration rows survive");
+
+        // Old row predates the column: migration backfills the same empty
+        // default a fresh CREATE TABLE would use, not a real historical
+        // value — reindex-new/-all is the documented path for that.
+        let old_username: String = conn
+            .query_row(
+                "SELECT username FROM events WHERE raw_file = 'raw/old.jsonl'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_username, "");
+
+        let new_username: String = conn
+            .query_row(
+                "SELECT username FROM events WHERE raw_file = 'raw/new.jsonl'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_username, "root");
+
+        drop(connections);
+        db2.close_all();
     }
 }
