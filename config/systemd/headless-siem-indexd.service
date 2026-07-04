@@ -9,7 +9,7 @@ Type=simple
 User=user
 Environment=HEADLESS_SIEM_ROOT=/home/user/projects/headless-siem
 WorkingDirectory=/home/user/projects/headless-siem
-ExecStart=/home/user/projects/headless-siem/target/release/indexd --data-dir /home/user/projects/headless-siem/data
+ExecStart=/home/user/projects/headless-siem/target/release/indexd --data-dir /home/user/projects/headless-siem/data --config /home/user/projects/headless-siem/config/sources.toml
 StandardOutput=journal
 StandardError=journal
 Restart=on-failure

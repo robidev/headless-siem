@@ -3,17 +3,17 @@
 # Installs binaries to /usr/local/bin, config to /etc/headless-siem,
 # and systemd units to /etc/systemd/system/.
 #
-# Usage: sudo bash install.sh [--release|--debug]
-#   --release  Install release binaries (default)
-#   --debug    Install debug binaries (for development)
+# Usage: sudo bash install.sh [release|debug]
+#   release  Install release binaries (default)
+#   debug    Install debug binaries (for development)
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_TYPE="${1:-release}"
 
 if [[ "$BUILD_TYPE" != "release" && "$BUILD_TYPE" != "debug" ]]; then
-    echo "Usage: sudo bash install.sh [--release|--debug]"
+    echo "Usage: sudo bash install.sh [release|debug]"
     exit 1
 fi
 
@@ -52,12 +52,14 @@ done
 # ── Install binaries ──────────────────────────────────────────────────
 echo ""
 echo "Installing binaries to /usr/local/bin/..."
-cp "$NORMALIZED" /usr/local/bin/headless-siem-normalized
-cp "$INDEXD" /usr/local/bin/headless-siem-indexd
-cp "$RULED" /usr/local/bin/headless-siem-ruled
-cp "$CORRELATED" /usr/local/bin/headless-siem-correlated
-cp "$SIEMCTL" /usr/local/bin/siemctl
-chmod 755 /usr/local/bin/headless-siem-{normalized,indexd,ruled,correlated} /usr/local/bin/siemctl
+# `install` (not cp): does an atomic unlink+rename rather than an in-place
+# write, so re-running this against a service that's still running doesn't
+# fail with "Text file busy".
+install -m 755 "$NORMALIZED" /usr/local/bin/headless-siem-normalized
+install -m 755 "$INDEXD" /usr/local/bin/headless-siem-indexd
+install -m 755 "$RULED" /usr/local/bin/headless-siem-ruled
+install -m 755 "$CORRELATED" /usr/local/bin/headless-siem-correlated
+install -m 755 "$SIEMCTL" /usr/local/bin/siemctl
 echo "  Done."
 
 # ── Install config ────────────────────────────────────────────────────
@@ -72,6 +74,8 @@ if [[ -f "$PROJECT_ROOT/config/normalized.toml" ]]; then
     cp "$PROJECT_ROOT/config/normalized.toml" /etc/headless-siem/
 fi
 cp -r "$PROJECT_ROOT/config/rules" /etc/headless-siem/
+# correlations.toml: cross-rule correlation window/threshold definitions for correlated
+cp "$PROJECT_ROOT/config/correlations.toml" /etc/headless-siem/
 mkdir -p /etc/headless-siem/rsyslog.d
 cp "$PROJECT_ROOT/config/rsyslog.d/50-headless-siem.conf" /etc/headless-siem/rsyslog.d/
 mkdir -p /etc/headless-siem/notify

@@ -14,9 +14,14 @@
 #             overwrite earlier ones, so source-specific rules can intentionally
 #             override a generic assignment (see systemd session_start).
 
+# 5514, not the reserved 514: normalized listens directly (no local rsyslog
+# relay — rsyslog isn't installed on clawserver, and this standalone-listener
+# mode is the deployment path actually in use there). 5514 matches what
+# pfSense/Proxmox/jumphost are already configured to forward to; see
+# llm-based-soc/documentation/log-forwarding-setup.md.
 [listen]
-udp_port = 514
-tcp_port = 514
+udp_port = 5514
+tcp_port = 5514
 
 [storage]
 data_dir = "data"

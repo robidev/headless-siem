@@ -7,8 +7,8 @@ Type=oneshot
 RemainAfterExit=yes
 User=user
 WorkingDirectory=/home/user/projects/headless-siem
+RuntimeDirectory=headless-siem
 
-ExecStartPre=/usr/bin/mkdir -p /run/headless-siem
 ExecStart=/bin/sh -c '\
   [ -p /run/headless-siem/normalized-in.pipe ]  || /usr/bin/mkfifo /run/headless-siem/normalized-in.pipe; \
   [ -p /run/headless-siem/normalized-out.pipe ] || /usr/bin/mkfifo /run/headless-siem/normalized-out.pipe; \

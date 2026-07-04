@@ -4,17 +4,20 @@ Documentation=https://github.com/your-org/headless-siem
 After=network.target headless-siem-pipes.service
 Requires=headless-siem-pipes.service
 
-# normalized reads syslog lines from a named pipe written by rsyslog and
-# writes normalized JSONL to another named pipe consumed by ruled.
+# normalized listens directly on UDP/TCP (config/normalized.toml's [listen])
+# and writes normalized JSONL to a named pipe consumed by ruled. No local
+# rsyslog relay — clawserver doesn't have rsyslog installed, and this
+# standalone-listener mode is the same one already proven reliable for
+# several days of real traffic via dev.sh, just running under systemd
+# instead. Senders (pfSense, Proxmox, jumphost) forward straight here; see
+# llm-based-soc/documentation/log-forwarding-setup.md.
 #
-# rsyslog side: see config/rsyslog.d/50-headless-siem.conf — rsyslog appends
-# to /run/headless-siem/normalized-in.pipe using omfile (no omprog needed).
-#
-# Alternative — standalone UDP/TCP receiver (no rsyslog omprog, no named pipe):
-#   1. Remove StandardInput= and replace --stdin with nothing (use default mode)
-#   2. Set [listen] in normalized.toml for the desired port
-#   3. Configure rsyslog with omfwd to forward to that address/port
-#   4. Add AmbientCapabilities=CAP_NET_BIND_SERVICE if port < 1024
+# Alternative — local rsyslog relay via a named pipe (disk-backed queue,
+# useful if you want rsyslog's own buffering/durability in front of
+# normalized): see config/rsyslog.d/50-headless-siem.conf, then
+#   1. Add --stdin to ExecStart below
+#   2. Add StandardInput=file:/run/headless-siem/normalized-in.pipe
+#   3. Copy 50-headless-siem.conf to /etc/rsyslog.d/ and restart rsyslog
 
 [Service]
 Type=simple
@@ -22,11 +25,9 @@ User=user
 WorkingDirectory=/home/user/projects/headless-siem
 
 ExecStart=/home/user/projects/headless-siem/target/release/normalized \
-  --stdin \
   --data-dir /home/user/projects/headless-siem/data \
   --config /home/user/projects/headless-siem/config/normalized.toml
 
-StandardInput=file:/run/headless-siem/normalized-in.pipe
 StandardOutput=file:/run/headless-siem/normalized-out.pipe
 StandardError=journal
 

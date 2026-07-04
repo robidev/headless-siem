@@ -11,8 +11,7 @@ User=user
 Environment=HEADLESS_SIEM_ROOT=/home/user/projects/headless-siem
 WorkingDirectory=/home/user/projects/headless-siem
 ExecStart=/home/user/projects/headless-siem/target/release/correlated \
-  --window 300 \
-  --threshold 5 \
+  --config /home/user/projects/headless-siem/config/correlations.toml \
   --output /home/user/projects/headless-siem/data/alerts/correlated
 StandardInput=file:/run/headless-siem/ruled-out.pipe
 StandardOutput=journal
