@@ -41,6 +41,9 @@ install:
     install -m 644 {{systemd_src}}/headless-siem-ruled.service       {{systemd_dir}}/
     install -m 644 {{systemd_src}}/headless-siem-correlated.service  {{systemd_dir}}/
     install -m 644 {{systemd_src}}/headless-siem-pipes.service       {{systemd_dir}}/
+    @echo "=== NOTE: this recipe installs raw units referencing dev-tree paths."
+    @echo "    Use config/systemd/install.sh for a full production install"
+    @echo "    (rewrites paths, installs config/, creates /var/lib/headless-siem)."
     @echo "=== Reloading systemd ==="
     systemctl daemon-reload
     @echo "=== Install complete ==="

@@ -22,8 +22,15 @@ cargo test -p ruled
 # Run a single integration test
 bash tests/integration/test-pipeline.sh
 
-# Install to /usr/local/bin + systemd units (requires root)
-make install
+# Install raw units for local poking around (requires root) — dev-tree
+# paths baked into the units, no config copied, no data dir created.
+# NOT a real deployment; see below.
+make install   # or: just install
+
+# Real production install (requires root) — rewrites paths, installs
+# config/ to /etc/headless-siem, creates /var/lib/headless-siem, enables
+# + starts all services. This is the one to use for an actual deployment.
+sudo bash config/systemd/install.sh release
 ```
 
 > Integration tests use **debug** binaries from `target/debug/`, not release. Build with `cargo build` (no `--release`) before running them.
