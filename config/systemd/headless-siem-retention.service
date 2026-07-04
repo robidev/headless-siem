@@ -1,0 +1,21 @@
+[Unit]
+Description=Headless SIEM - Retention Cleanup
+Documentation=https://github.com/your-org/headless-siem
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/home/user/projects/headless-siem
+ExecStart=/home/user/projects/headless-siem/target/release/siemctl retention \
+  --data-dir /home/user/projects/headless-siem/data \
+  --days 30 \
+  --yes
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/home/user/projects/headless-siem/data

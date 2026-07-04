@@ -96,15 +96,19 @@ echo ""
 echo "Installing systemd units to /etc/systemd/system/..."
 
 # Update service files to use installed paths
-for svc in normalized indexd ruled correlated pipes alert-watch; do
+for svc in normalized indexd ruled correlated pipes alert-watch retention; do
     SRC="$PROJECT_ROOT/config/systemd/headless-siem-${svc}.service"
     if [[ -f "$SRC" ]]; then
-        # Copy and adjust paths for installed layout
+        # siemctl isn't in the substitution list below (unlike the other 4
+        # binaries) because only retention.service invokes it, and it needs
+        # its own line since the target filename differs (siemctl, not
+        # headless-siem-siemctl).
         sed \
             -e "s|/home/user/projects/headless-siem/target/release/normalized|/usr/local/bin/headless-siem-normalized|g" \
             -e "s|/home/user/projects/headless-siem/target/release/indexd|/usr/local/bin/headless-siem-indexd|g" \
             -e "s|/home/user/projects/headless-siem/target/release/ruled|/usr/local/bin/headless-siem-ruled|g" \
             -e "s|/home/user/projects/headless-siem/target/release/correlated|/usr/local/bin/headless-siem-correlated|g" \
+            -e "s|/home/user/projects/headless-siem/target/release/siemctl|/usr/local/bin/siemctl|g" \
             -e "s|/home/user/projects/headless-siem/data|/var/lib/headless-siem|g" \
             -e "s|/home/user/projects/headless-siem/config|/etc/headless-siem|g" \
             -e "s|WorkingDirectory=/home/user/projects/headless-siem|WorkingDirectory=/var/lib/headless-siem|g" \
@@ -113,6 +117,9 @@ for svc in normalized indexd ruled correlated pipes alert-watch; do
         echo "  Installed: headless-siem-${svc}.service"
     fi
 done
+
+# The retention timer has no dev-tree paths to rewrite — install as-is.
+install -m 644 "$PROJECT_ROOT/config/systemd/headless-siem-retention.timer" /etc/systemd/system/
 
 # ── Reload systemd ────────────────────────────────────────────────────
 systemctl daemon-reload
@@ -127,6 +134,9 @@ systemctl enable headless-siem-indexd.service
 systemctl enable headless-siem-ruled.service
 systemctl enable headless-siem-correlated.service
 systemctl enable headless-siem-alert-watch.service
+# retention.service is a oneshot triggered by the timer — enable the timer,
+# not the service itself.
+systemctl enable headless-siem-retention.timer
 
 echo ""
 echo "Starting services..."
@@ -137,6 +147,7 @@ systemctl start headless-siem-indexd.service
 systemctl start headless-siem-ruled.service
 systemctl start headless-siem-correlated.service
 systemctl start headless-siem-alert-watch.service
+systemctl start headless-siem-retention.timer
 
 # ── Verify ─────────────────────────────────────────────────────────────
 echo ""
