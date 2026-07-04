@@ -68,6 +68,7 @@ start_watcher() {
     ALERT_WATCH_STATE_DIR="$STATE_DIR" \
     SOC_NOTIFY_SCRIPT="$NOTIFY_SCRIPT" \
     ALERT_WATCH_LEVEL="high" \
+    ALERT_WATCH_SWEEP_INTERVAL="2" \
     setsid "$WATCHER" > "$TEST_DIR/watch.log" 2>&1 &
     WATCHER_PID=$!
     # Wait for the baseline-established log line rather than a fixed sleep —
@@ -217,6 +218,43 @@ if wait_for_notify_count 1; then
     pass "post-restart critical alert notified"
 else
     fail "post-restart notify" "expected 1 call within 3s"
+fi
+
+echo ""
+echo "[7] periodic sweep catches an alert the reactive watch missed"
+# Regression test for a real bug found live: a brand-new, multi-level-deep
+# alerts/YYYY/MM/DD/HH/ bucket (first alert of a new hour) can be created
+# by ruled/correlated faster than inotifywait wakes up and installs a
+# watch on the newly-created intermediate directories — the kernel then
+# never generates a CREATE event for the deeper levels at all, so the
+# reactive watch never sees the file. There's no reliable way to force
+# that exact filesystem race on demand, so this simulates the *symptom*
+# directly: a file whose on-disk content has advanced past what its
+# tracked read-offset says (exactly what "reactive watch missed it" looks
+# like from process_file's point of view, regardless of why) — and
+# verifies the periodic sweep (started with a 2s interval by start_watcher
+# above) notices and processes it within one interval, rather than never.
+rm -f "$NOTIFY_LOG"
+SWEEP_BUCKET="$DATA_DIR/alerts/2026/07/03/09"
+mkdir -p "$SWEEP_BUCKET"
+echo '{"_ruled":true,"rule_id":"missed-by-reactive","level":"critical"}' >> "$SWEEP_BUCKET/alerts.jsonl"
+# Let the reactive watch process it first (this is the common case — it
+# should, and does, catch a brand-new file in an already-existing/watched
+# tree). We then reset its tracked offset to 0 to simulate "the reactive
+# watch never saw this," and confirm the sweep alone re-derives the
+# correct state within its interval.
+if wait_for_notify_count 1; then
+    pass "setup: reactive watch processes the sweep-test alert normally"
+else
+    fail "setup: reactive watch processes the sweep-test alert" "$(notify_count) calls"
+fi
+STATE_FILE="$STATE_DIR/$(printf '%s' "$SWEEP_BUCKET/alerts.jsonl" | md5sum | cut -d' ' -f1).offset"
+printf '0' > "$STATE_FILE"
+rm -f "$NOTIFY_LOG"
+if wait_for_notify_count 1; then
+    pass "sweep reprocessed the file within its interval after its state was reset"
+else
+    fail "sweep reprocessing" "expected 1 call within 3s, got $(notify_count)"
 fi
 
 echo ""

@@ -21,18 +21,32 @@
 # which doesn't — see handle_line() below) and calls the configured notify
 # script for every new alert meeting the level threshold.
 #
+# Two layers of detection run concurrently: a reactive inotifywait watch
+# (low-latency, the common path) and a periodic mtime-based reconciliation
+# sweep (a backstop — confirmed live that a brand-new, multi-level-deep
+# alerts/YYYY/MM/DD/HH/ bucket, the first alert of a new hour, can be
+# created faster than inotifywait installs a watch on the newly-created
+# intermediate directories, in which case the kernel never generates an
+# event for it at all; see sweep_recent()'s doc comment for the full
+# analysis). Both layers funnel through the same offset-tracked
+# process_file(), so there's no double-notify risk from having both active.
+#
 # USAGE:
 #   alert-watch.sh
 #
 # ENVIRONMENT:
-#   SIEM_DATA_DIR         Data directory to watch (default: ./data)
-#   ALERT_WATCH_STATE_DIR Per-file read-offset state (default:
-#                         /var/lib/headless-siem/alert-watch)
-#   SOC_NOTIFY_SCRIPT      Notify script, called as
-#                         "<script> <priority> <subject> <body-file>"
-#                         (default: /usr/local/bin/soc-notify)
-#   ALERT_WATCH_LEVEL      Minimum ruled alert level to notify on:
-#                         low|medium|high|critical (default: high)
+#   SIEM_DATA_DIR              Data directory to watch (default: ./data)
+#   ALERT_WATCH_STATE_DIR      Per-file read-offset state (default:
+#                              /var/lib/headless-siem/alert-watch)
+#   SOC_NOTIFY_SCRIPT          Notify script, called as
+#                              "<script> <priority> <subject> <body-file>"
+#                              (default: /usr/local/bin/soc-notify)
+#   ALERT_WATCH_LEVEL          Minimum ruled alert level to notify on:
+#                              low|medium|high|critical (default: high)
+#   ALERT_WATCH_SWEEP_INTERVAL       Reconciliation sweep interval, seconds
+#                                    (default: 60)
+#   ALERT_WATCH_SWEEP_LOOKBACK_MINUTES  How far back (by mtime) the sweep
+#                                       looks (default: 15)
 #
 # A silent failure here means a missed critical alert, so every failure
 # path logs loudly to stderr (captured by journald under the systemd unit)
@@ -50,6 +64,13 @@ STATE_DIR="${ALERT_WATCH_STATE_DIR:-/var/lib/headless-siem/alert-watch}"
 NOTIFY_SCRIPT="${SOC_NOTIFY_SCRIPT:-/usr/local/bin/soc-notify}"
 LEVEL_THRESHOLD="${ALERT_WATCH_LEVEL:-high}"
 LOG_PREFIX="[alert-watch]"
+
+# How often the periodic reconciliation sweep runs, and how far back (by
+# mtime) it looks — see the sweep_recent()/sweep_loop() doc comment below
+# for why this exists. Overridable for tests that don't want to wait a
+# full minute for the backstop to prove itself.
+SWEEP_INTERVAL_SECONDS="${ALERT_WATCH_SWEEP_INTERVAL:-60}"
+SWEEP_LOOKBACK_MINUTES="${ALERT_WATCH_SWEEP_LOOKBACK_MINUTES:-15}"
 
 log() { echo "$LOG_PREFIX $*" >&2; }
 
@@ -171,6 +192,46 @@ process_file() {
     printf '%s' "$size" > "$state"
 }
 
+# sweep_recent — re-check any *.jsonl under $ALERTS_DIR modified in the
+# last $SWEEP_LOOKBACK_MINUTES, regardless of whether inotify ever told us
+# about it.
+#
+# WHY THIS EXISTS: recursive inotify watching has an inherent TOCTOU race
+# for a brand-new, multi-level-deep directory chain created in one burst —
+# `ruled`/`correlated` create data/alerts/YYYY/MM/DD/HH/ on the first alert
+# of a new hour via a single fs::create_dir_all + file write, which can
+# complete faster than inotifywait wakes up and installs a watch on the
+# newly-created intermediate directories. When that happens, the kernel
+# never generates a CREATE event for the deeper levels at all — there's
+# nothing to "catch up on" later from the event stream, because the event
+# never existed. This is the exact same failure mode fixed for indexd in
+# implementation-plan.md 1.6 (see indexd's RECENT_FILE_SWEEP_INTERVAL doc
+# comment for the full race analysis) — confirmed live here too: a
+# brand-new hour bucket's first alert.jsonl was written and never
+# processed by the reactive watch below.
+#
+# process_file()'s byte-offset tracking makes re-checking an
+# already-fully-processed file a fast no-op, so this is cheap to run
+# often. `-mmin` bounds the walk to recently-touched files, not the whole
+# alerts tree.
+sweep_recent() {
+    local f
+    while IFS= read -r -d '' f; do
+        process_file "$f"
+    done < <(find "$ALERTS_DIR" -name '*.jsonl' -mmin "-$SWEEP_LOOKBACK_MINUTES" -print0 2>/dev/null)
+}
+
+# sweep_loop — runs sweep_recent on a timer, as a background job alongside
+# the event-driven main loop below. Started before the signal trap is
+# armed isn't required (it shares this script's process group either way,
+# and the group-kill in cleanup() takes it out along with inotifywait).
+sweep_loop() {
+    while true; do
+        sleep "$SWEEP_INTERVAL_SECONDS"
+        sweep_recent
+    done
+}
+
 # ── Initial baseline: don't replay history on (re)start ─────────────────
 existing_count=0
 while IFS= read -r -d '' f; do
@@ -204,6 +265,11 @@ cleanup() {
     exit 0
 }
 trap cleanup TERM INT
+
+# Periodic reconciliation backstop (see sweep_recent()'s doc comment) —
+# runs alongside the event-driven loop below, not instead of it.
+sweep_loop &
+log "reconciliation sweep running every ${SWEEP_INTERVAL_SECONDS}s (lookback ${SWEEP_LOOKBACK_MINUTES}m)"
 
 # ── Main loop ─────────────────────────────────────────────────────────────
 # close_write: every append (ruled/correlated open+append+close per line).

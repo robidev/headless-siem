@@ -92,6 +92,23 @@ are human-readable, survive crashes, and can be committed to git for audit trail
 > stop a `cmd1 | cmd2` pipeline's other member — the fix is a
 > process-group kill (matching `KillMode=control-group`, systemd's own
 > default stop behavior for this unit).
+>
+> **Update (2026-07-04):** running this live surfaced a real miss — a
+> brand-new hour bucket's first alert was never notified on. Root cause is
+> the same class of inotify recursive-watch race fixed for `indexd` in
+> item 27/Phase 1.6 (a multi-level-deep directory chain can be created
+> faster than the watcher installs a watch on the new intermediate
+> levels, so the kernel never emits an event for it — nothing to catch up
+> on later, because the event never existed). Fixed with the same
+> pattern: a periodic mtime-based reconciliation sweep
+> (`sweep_recent`/`sweep_loop` in the script, `ALERT_WATCH_SWEEP_INTERVAL`/
+> `ALERT_WATCH_SWEEP_LOOKBACK_MINUTES` to tune) running alongside the
+> reactive watch, both funneling through the same offset-tracked
+> `process_file()` so there's no double-notify risk. Also switched the
+> notify backend to a real, working `soc-notify` (ntfy.sh, public instance
+> for now — see `llm-based-soc/decisions.md` § 0.5) and verified the full
+> path end-to-end against the live dev pipeline: injected alert → `ruled`
+> → watcher → `soc-notify` → push notification received.
 
 **The problem:** Alerts sit in files. A SOC analyst cannot watch a directory tree
 in real time. There is no active signal when something important fires.
