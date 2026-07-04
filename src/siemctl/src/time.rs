@@ -53,7 +53,20 @@ impl HourBucket {
             .join(format!("{:02}", self.hour))
     }
 
-    fn advance(self) -> Self {
+    /// Truncate a `DateTime<Utc>` down to its hour bucket.
+    pub fn from_datetime(dt: DateTime<Utc>) -> Self {
+        Self { year: dt.year(), month: dt.month() as u8, day: dt.day() as u8, hour: dt.hour() as u8 }
+    }
+
+    /// This bucket's start instant.
+    pub fn to_datetime(self) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(self.year, self.month as u32, self.day as u32, self.hour as u32, 0, 0)
+            .single()
+            .expect("HourBucket always holds a valid calendar hour")
+    }
+
+    /// The next hour bucket after this one.
+    pub fn advance(self) -> Self {
         let mut h = self.hour + 1;
         let mut d = self.day;
         let mut m = self.month;
@@ -71,6 +84,24 @@ impl HourBucket {
             }
         }
         Self { year: y, month: m, day: d, hour: h }
+    }
+
+    /// Advance by `n` hours (`n == 0` returns `self` unchanged).
+    pub fn advance_by(self, n: u32) -> Self {
+        let mut cur = self;
+        for _ in 0..n {
+            cur = cur.advance();
+        }
+        cur
+    }
+
+    /// Compact, unambiguous label for a trend-table column header:
+    /// `"MM-DD HH:00"`. Always date-qualified (unlike the digest's
+    /// same-day-collapsing `fmt_header_times`) since `stats --interval` is
+    /// an investigation tool a specialist reads closely, not a Tier-1
+    /// agent's every-run summary — clarity wins over compactness here.
+    pub fn label(&self) -> String {
+        format!("{:02}-{:02} {:02}:00", self.month, self.day, self.hour)
     }
 }
 
@@ -126,6 +157,33 @@ mod tests {
         let a = HourBucket::from_filename("2026-06-22-08.db").unwrap();
         let b = HourBucket::parse("2026-06-22T09").unwrap();
         assert!(a < b);
+    }
+
+    #[test]
+    fn from_datetime_truncates_to_the_hour() {
+        let dt = Utc.with_ymd_and_hms(2026, 6, 22, 8, 42, 17).unwrap();
+        assert_eq!(HourBucket::from_datetime(dt), HourBucket { year: 2026, month: 6, day: 22, hour: 8 });
+    }
+
+    #[test]
+    fn to_datetime_round_trips_from_datetime() {
+        let dt = Utc.with_ymd_and_hms(2026, 6, 22, 8, 0, 0).unwrap();
+        assert_eq!(HourBucket::from_datetime(dt).to_datetime(), dt);
+    }
+
+    #[test]
+    fn advance_by_crosses_day_month_year_boundaries() {
+        let b = HourBucket { year: 2026, month: 6, day: 22, hour: 22 };
+        assert_eq!(b.advance_by(0), b);
+        assert_eq!(b.advance_by(2), HourBucket { year: 2026, month: 6, day: 23, hour: 0 });
+        let ny = HourBucket { year: 2026, month: 12, day: 31, hour: 23 };
+        assert_eq!(ny.advance_by(1), HourBucket { year: 2027, month: 1, day: 1, hour: 0 });
+    }
+
+    #[test]
+    fn label_is_month_day_hour() {
+        let b = HourBucket { year: 2026, month: 6, day: 22, hour: 8 };
+        assert_eq!(b.label(), "06-22 08:00");
     }
 }
 

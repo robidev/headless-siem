@@ -459,6 +459,8 @@ fn cmd_stats(args: &[String]) -> Result<i32> {
     let mut source: Option<String> = None;
     let mut after: Option<time::HourBucket> = None;
     let mut before: Option<time::HourBucket> = None;
+    let mut interval: Option<chrono::Duration> = None;
+    let mut last: Option<chrono::Duration> = None;
 
     let mut it = args.iter().map(String::as_str);
     while let Some(arg) = it.next() {
@@ -479,18 +481,44 @@ fn cmd_stats(args: &[String]) -> Result<i32> {
                         .ok_or_else(|| format!("invalid --before '{s}' (YYYY-MM-DDTHH)"))?,
                 );
             }
+            "--interval" => {
+                let s = next_arg(&mut it, arg)?;
+                let d = time::parse_duration(s)?;
+                if d.num_hours() < 1 || d != chrono::Duration::hours(d.num_hours()) {
+                    return Err(format!(
+                        "--interval must be a whole number of hours (got '{s}') — \
+                         the index is bucketed per clock-hour, so sub-hour trend \
+                         columns aren't available here (see 'siemctl digest' for \
+                         sub-hour sparklines)"
+                    )
+                    .into());
+                }
+                interval = Some(d);
+            }
+            "--last" => {
+                let s = next_arg(&mut it, arg)?;
+                last = Some(time::parse_duration(s)?);
+            }
             "--help" | "-h" => {
                 println!(
                     "Usage: siemctl stats [--source SRC] [--after YYYY-MM-DDTHH] \
-                     [--before YYYY-MM-DDTHH] [--data-dir DIR]\n\n\
+                     [--before YYYY-MM-DDTHH] [--data-dir DIR]\n       \
+                     siemctl stats --interval Nh (--last Nh | --after ... --before ...) \
+                     [--source SRC] [--data-dir DIR]\n\n\
                      Show event counts and field coverage from the index.\n\n\
                      Without --source: event counts per source, then overall field coverage.\n\
                      With --source SRC: event type breakdown for that source, then per-field\n\
                      coverage scoped to that source.\n\n\
+                     With --interval: instead of one aggregate total, print a volume-trend\n\
+                     table — one column per interval-sized time bucket, one row per source\n\
+                     (or per event type, with --source). Needs an overall range, given via\n\
+                     --last (relative to now) or an explicit --after/--before pair.\n\n\
                      Options:\n\
                      \x20 --source SRC       Restrict to one source label\n\
                      \x20 --after  YYYY-MM-DDTHH  Start of time range\n\
                      \x20 --before YYYY-MM-DDTHH  End of time range\n\
+                     \x20 --interval Nh      Trend table bucket width, whole hours (e.g. 1h, 3h)\n\
+                     \x20 --last Nh/Nd       Overall range: the last N hours/days, ending now\n\
                      \x20 --data-dir DIR     Data directory (default: ./data)"
                 );
                 return Ok(0);
@@ -500,6 +528,21 @@ fn cmd_stats(args: &[String]) -> Result<i32> {
                 return Ok(1);
             }
         }
+    }
+
+    if let Some(d) = last {
+        if after.is_some() || before.is_some() {
+            return Err("--last cannot be combined with --after/--before".into());
+        }
+        let now = chrono::Utc::now();
+        after = Some(time::HourBucket::from_datetime(now - d));
+        before = Some(time::HourBucket::from_datetime(now));
+    }
+
+    if let Some(interval) = interval {
+        let after = after.ok_or("--interval requires --last or --after/--before to set the overall range")?;
+        let before = before.ok_or("--interval requires --last or --after/--before to set the overall range")?;
+        return cmd_stats_trend(&data_dir, source.as_deref(), after, before, interval);
     }
 
     // Load indexed fields for field coverage query.
@@ -529,10 +572,13 @@ fn cmd_stats(args: &[String]) -> Result<i32> {
     let mut field_sums: HashMap<String, u64> = HashMap::new();
 
     for db_path in &dbs {
-        // Time-range pruning by bucket filename.
+        // Time-range pruning by bucket filename. Bucket filenames are
+        // dash-separated ("2026-06-22-08.db"); HourBucket::parse expects the
+        // CLI's "T"-separated form ("2026-06-22T08") and returns None for
+        // this shape, silently skipping the filter entirely — from_filename
+        // is the one that actually matches what's on disk here.
         if let Some(name) = db_path.file_name().and_then(|n| n.to_str()) {
-            let stem = name.trim_end_matches(".db");
-            if let Some(bkt) = time::HourBucket::parse(stem) {
+            if let Some(bkt) = time::HourBucket::from_filename(name) {
                 if after.map(|a| bkt < a).unwrap_or(false) { continue; }
                 if before.map(|b| bkt > b).unwrap_or(false) { continue; }
             }
@@ -633,6 +679,102 @@ fn cmd_stats(args: &[String]) -> Result<i32> {
             "     —".to_string()
         };
         println!("  {:<24}  {:>10}  {}", field, fmt_n(count), pct);
+    }
+
+    Ok(0)
+}
+
+/// `siemctl stats --interval` — a volume-trend table (roadmap item 5):
+/// one column per `interval`-sized time bucket, one row per source (or per
+/// event type, with `source` given), from `after` to `before` inclusive.
+/// Reuses the same per-hour-bucket index files the aggregate path above
+/// does; `interval` just groups adjacent hour buckets into wider columns.
+fn cmd_stats_trend(
+    data_dir: &Path,
+    source: Option<&str>,
+    after: time::HourBucket,
+    before: time::HourBucket,
+    interval: chrono::Duration,
+) -> Result<i32> {
+    if before < after {
+        return Err("--before must not be earlier than --after".into());
+    }
+    let interval_hours = interval.num_hours().max(1) as u32;
+
+    // One entry per trend-table column, in order.
+    let mut group_starts: Vec<time::HourBucket> = Vec::new();
+    let mut cur = after;
+    loop {
+        group_starts.push(cur);
+        if cur >= before {
+            break;
+        }
+        cur = cur.advance_by(interval_hours);
+    }
+
+    let dbs = query::index_buckets(data_dir)?;
+
+    let (sql, param_list): (&str, Vec<String>) = match source {
+        None => ("SELECT _source_type, COUNT(*) FROM events GROUP BY _source_type", vec![]),
+        Some(s) => (
+            "SELECT event_type, COUNT(*) FROM events WHERE _source_type = ? GROUP BY event_type",
+            vec![s.to_string()],
+        ),
+    };
+
+    let mut group_data: Vec<BTreeMap<String, u64>> = vec![BTreeMap::new(); group_starts.len()];
+    let mut row_totals: BTreeMap<String, u64> = BTreeMap::new();
+
+    for db_path in &dbs {
+        let Some(name) = db_path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(bkt) = time::HourBucket::from_filename(name) else { continue };
+        if bkt < after || bkt > before {
+            continue;
+        }
+        let hours_since_start = (bkt.to_datetime() - after.to_datetime()).num_hours().max(0) as u32;
+        let group_idx = (hours_since_start / interval_hours) as usize;
+        let Some(group_bucket) = group_data.get_mut(group_idx) else { continue };
+
+        let Ok(conn) = db::open_bucket_conn(db_path, data_dir) else { continue };
+        let mut acc: BTreeMap<Vec<String>, u64> = BTreeMap::new();
+        let _ = db::fold_group_sql(&conn, sql, &param_list, 1, &mut acc);
+        for (key, count) in acc {
+            let row_key = key.into_iter().next().unwrap_or_default();
+            if row_key.is_empty() {
+                continue;
+            }
+            *group_bucket.entry(row_key.clone()).or_default() += count;
+            *row_totals.entry(row_key).or_default() += count;
+        }
+    }
+
+    if row_totals.is_empty() {
+        println!("(no data in range)");
+        return Ok(1);
+    }
+
+    let mut rows: Vec<String> = row_totals.keys().cloned().collect();
+    rows.sort_by(|a, b| {
+        row_totals.get(b).cmp(&row_totals.get(a)).then_with(|| a.cmp(b))
+    });
+
+    let row_header = if source.is_some() { "event_type" } else { "source" };
+    let row_width = rows.iter().map(|r| r.len()).max().unwrap_or(0).max(row_header.len());
+    const COL_WIDTH: usize = 11; // "MM-DD HH:00" is 11 chars
+
+    print!("{:<width$}", row_header, width = row_width);
+    for g in &group_starts {
+        print!("  {:>width$}", g.label(), width = COL_WIDTH);
+    }
+    println!();
+
+    for row in &rows {
+        print!("{:<width$}", row, width = row_width);
+        for gd in &group_data {
+            let count = gd.get(row).copied().unwrap_or(0);
+            print!("  {:>width$}", fmt_n(count), width = COL_WIDTH);
+        }
+        println!();
     }
 
     Ok(0)

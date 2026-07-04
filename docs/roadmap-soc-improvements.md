@@ -150,6 +150,26 @@ the date so suppressions are reviewed rather than forgotten.
 
 ## 5. Time-trending / volume baselines
 
+> **Status: implemented** (2026-07-04, llm-based-soc implementation plan
+> Phase 1.4). `siemctl stats --interval Nh (--last Nh | --after ... --before
+> ...) [--source SRC]` — matches the proposed design below closely (one
+> column per interval-sized bucket, one row per source, or per event type
+> with `--source`). `--interval` must be a whole number of hours (the index
+> is bucketed per clock-hour; sub-hour trends are `siemctl digest`'s
+> sparkline's job, not this command's). Column labels are always
+> date-qualified (`MM-DD HH:00`) rather than the mockup's bare `HH:MM`,
+> since this is a specialist's investigation tool read closely, not a
+> Tier-1 agent's every-run summary — unambiguous beats compact here.
+> Building this surfaced a real, previously untested bug in the existing
+> aggregate `--after`/`--before` path: it parsed index bucket *filenames*
+> ("2026-06-22-08.db") with the CLI-argument parser, which requires a "T"
+> separator ("2026-06-22T08") and returns no match for the dash-only form —
+> silently skipping the filter entirely, so `stats --after X --before Y`
+> was returning the grand total across *all* buckets regardless of the
+> requested range. Fixed at both call sites (the pre-existing aggregate
+> path and the new trend path) to use the filename-specific parser;
+> `tests/integration/test-siemctl-stats.sh` has a regression check for it.
+
 **The problem:** `siemctl stats` shows total event counts but no time distribution.
 It is impossible to tell whether 500 sshd events in the current hour is normal
 or an anomaly without manually running multiple time-bounded queries and

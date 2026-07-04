@@ -424,6 +424,43 @@ rg "Failed password" data/raw/
 jq '.src_ip' data/raw/2026/06/22/08/**/*.jsonl
 ```
 
+### Stats
+
+`siemctl stats` reports event counts and indexed-field coverage. Two modes:
+
+```bash
+# Aggregate: total counts per source, then field coverage, over a range
+siemctl stats --data-dir data/ --after 2026-06-22T08 --before 2026-06-22T12
+
+# Per-source event-type breakdown instead of the source breakdown
+siemctl stats --data-dir data/ --source sshd
+```
+
+**Volume-trend table** (`--interval`): instead of one aggregate total, a
+column per time bucket — is 500 sshd events this hour normal, or a spike?
+Needs an overall range, given via `--last` (relative to now) or an explicit
+`--after`/`--before` pair. `--interval` must be a whole number of hours (the
+index is bucketed per clock-hour; for sub-hour trends see `siemctl digest`'s
+sparkline instead).
+
+```bash
+# One column per hour, over the last 24 hours
+siemctl stats --data-dir data/ --interval 1h --last 24h
+
+# Coarser 3-hour columns over an explicit range
+siemctl stats --data-dir data/ --interval 3h --after 2026-06-22T00 --before 2026-06-23T00
+
+# --source narrows rows to that source's event types, same as the aggregate mode
+siemctl stats --data-dir data/ --source sshd --interval 1h --last 24h
+```
+
+```
+source           07-03 20:00  07-03 21:00  07-03 22:00  07-03 23:00
+filterlog                312          296          803          241
+openvpn                   88           91          962           84
+sshd                      12            9           14            11
+```
+
 ### Digest
 
 `siemctl digest` answers "what's different right now?" in one command,
