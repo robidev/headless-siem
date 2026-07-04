@@ -150,13 +150,26 @@ pub fn load_per_source_fields(path: &Path) -> BTreeMap<String, Vec<String>> {
     result
 }
 
-/// Locate `config/sources.toml` relative to cwd or the running binary.
+/// Locate `sources.toml`: explicit override, cwd/dev-tree, the production
+/// install location, or walking up from the running binary.
 pub fn find_sources_toml() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("SIEMCTL_CONFIG_DIR") {
+        let c = Path::new(&dir).join("sources.toml");
+        if c.is_file() {
+            return Some(c);
+        }
+    }
     for rel in &["config/sources.toml", "../config/sources.toml"] {
         let p = Path::new(rel);
         if p.is_file() {
             return Some(p.to_path_buf());
         }
+    }
+    // Production install location (see config/systemd/install.sh) — a flat
+    // copy, not a config/ subdir, so it's checked directly.
+    let prod = Path::new("/etc/headless-siem/sources.toml");
+    if prod.is_file() {
+        return Some(prod.to_path_buf());
     }
     // Walk up from the binary: siemctl lives at src/siemctl/target/{debug,release}/siemctl
     let exe = std::env::current_exe().ok()?;

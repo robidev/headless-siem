@@ -21,6 +21,22 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const DEFAULT_DATA_DIR: &str = "./data";
+const PROD_DATA_DIR: &str = "/var/lib/headless-siem";
+
+/// `./data` for the dev tree; falls back to the production data dir (see
+/// config/systemd/install.sh) if that's not present, so siemctl works from
+/// any cwd on an installed host without requiring --data-dir every time.
+fn default_data_dir() -> PathBuf {
+    let dev = PathBuf::from(DEFAULT_DATA_DIR);
+    if dev.is_dir() {
+        return dev;
+    }
+    let prod = PathBuf::from(PROD_DATA_DIR);
+    if prod.is_dir() {
+        return prod;
+    }
+    dev
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -192,7 +208,7 @@ fn stem_matches(path: &Path, source: Option<&str>) -> bool {
 // ── cmd: status ────────────────────────────────────────────────────────────
 
 fn cmd_status(args: &[String]) -> Result<i32> {
-    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut data_dir = default_data_dir();
     let mut verbose = false;
 
     let mut it = args.iter().map(String::as_str);
@@ -455,7 +471,7 @@ fn count_dir_size(dir: &Path, total: &mut u64) {
 // ── cmd: stats ─────────────────────────────────────────────────────────────
 
 fn cmd_stats(args: &[String]) -> Result<i32> {
-    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut data_dir = default_data_dir();
     let mut source: Option<String> = None;
     let mut after: Option<time::HourBucket> = None;
     let mut before: Option<time::HourBucket> = None;
@@ -830,7 +846,7 @@ fn stats_from_raw(
 // ── cmd: search ────────────────────────────────────────────────────────────
 
 fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
-    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut data_dir = default_data_dir();
     let mut dsl: Option<String> = None;
     let mut raw: Option<Option<String>> = None; // Some(None)=--raw no arg; Some(Some(s))=--raw SUBSTRING
     let mut after: Option<time::HourBucket> = None;
@@ -962,7 +978,7 @@ fn cmd_alerts(args: &[String]) -> Result<i32> {
         return cmd_alerts_ack(&args[1..]);
     }
 
-    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut data_dir = default_data_dir();
     let mut dsl: Option<String> = None;
     let mut after: Option<time::HourBucket> = None;
     let mut before: Option<time::HourBucket> = None;
@@ -1029,7 +1045,7 @@ fn cmd_alerts(args: &[String]) -> Result<i32> {
 }
 
 fn cmd_alerts_ack(args: &[String]) -> Result<i32> {
-    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut data_dir = default_data_dir();
     let mut note: Option<String> = None;
     let mut rule_id: Option<String> = None;
 
@@ -1195,7 +1211,7 @@ fn search_dump<W: io::Write>(
 // ── cmd: digest ──────────────────────────────────────────────────────────────
 
 fn cmd_digest(args: &[String]) -> Result<i32> {
-    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut data_dir = default_data_dir();
     let mut window_arg = "6h".to_string();
     let mut interval_arg = "10m".to_string();
     let mut format = "text".to_string();
@@ -1259,7 +1275,7 @@ fn cmd_digest(args: &[String]) -> Result<i32> {
 // ── cmd: tail ──────────────────────────────────────────────────────────────
 
 fn cmd_tail(args: &[String]) -> Result<i32> {
-    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut data_dir = default_data_dir();
     let mut source: Option<String> = None;
     let mut follow = true;
 
@@ -1377,7 +1393,7 @@ fn cmd_tail(args: &[String]) -> Result<i32> {
 // ── cmd: retention ─────────────────────────────────────────────────────────
 
 fn cmd_retention(args: &[String]) -> Result<i32> {
-    let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+    let mut data_dir = default_data_dir();
     let mut days: Option<u32> = None;
     let mut dry_run = false;
     let mut assume_yes = false;
