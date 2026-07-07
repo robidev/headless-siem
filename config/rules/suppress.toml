@@ -29,3 +29,26 @@
 # [[suppress]]
 # rule_id = "suricata-2210029"
 # condition = 'cidr_match(src_ip, "172.64.0.0/13")'
+
+# Candidates from llm-based-soc/runbooks/haproxy.md (Phase 3.1, 2026-07-07)
+# — real production data, 2026-07-04..07-07, all confirmed internet-scanner
+# ranges probing the reverse proxy's TLS listener. Commented pending
+# tuner-dev review, same as the rest of this file.
+
+# [[suppress]]
+# rule_id = "1007-haproxy-tls-probe"
+# condition = 'cidr_match(src_ip, "66.132.0.0/16")'
+# expires = "2026-10-05"
+# note = "Censys-style scanner range, seen 2026-07-03 shakedown + confirmed live 07-04..07-07"
+#
+# [[suppress]]
+# rule_id = "1007-haproxy-tls-probe"
+# condition = 'cidr_match(src_ip, "85.217.140.0/24")'
+# expires = "2026-10-05"
+# note = "Known scanner range, seen 2026-07-03 shakedown + confirmed live 07-04..07-07"
+#
+# [[suppress]]
+# rule_id = "1007-haproxy-tls-probe"
+# condition = 'cidr_match(src_ip, "199.45.154.0/24")'
+# expires = "2026-10-05"
+# note = "Known scanner range, seen 2026-07-03 shakedown + confirmed live 07-04..07-07"
