@@ -76,6 +76,9 @@ index_fields = ["username", "session_id", "session_class", "session_type", "even
 [source.unix_chkpwd]
 index_fields = ["username", "event_type"]
 
+[source.suricata]
+index_fields = ["gid", "sid", "rev", "alert_msg", "classification", "priority", "protocol", "src_ip", "src_port", "dst_ip", "dst_port", "event_type"]
+
 # Catch-all: fields indexed when the source label doesn't match any entry above.
 [source.default]
 index_fields = ["src_ip", "dst_ip", "event_type"]

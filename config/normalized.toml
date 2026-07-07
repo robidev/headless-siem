@@ -443,3 +443,27 @@ pattern = "password check (?P<chkpwd_result>failed) for user \((?P<username>[^)]
 app_name = "unix_chkpwd"
 chkpwd_result = "failed"
 set = { event_type = "local_auth_failure", severity = "warning" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# suricata  (pfSense IDS, classic alert-syslog / fast.log format)
+#
+# pfSense's Suricata package emits alerts via a built-in `syslog` output
+# (facility local1, identity "suricata") using the same message body as its
+# flat-file alerts.log:
+#   [**] [<gid>:<sid>:<rev>] <msg> [**] [Classification: <class>] [Priority: <n>] {<proto>} <src_ip>:<src_port> -> <dst_ip>:<dst_port>
+# `priority` is Suricata's own 1(high)-3(low) scale, captured as-is and
+# indexed (see sources.toml) — group/filter on it directly rather than via
+# `severity`. (`set.severity` in an extract rule is clobbered by the
+# syslog-envelope-derived severity later in the pipeline — same pre-existing
+# limitation the haproxy/unix_chkpwd rules below have; not fixed here.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[extract.rule]]
+app_name = "suricata"
+from = "message"
+pattern = "^\[\*\*\] \[(?P<gid>\d+):(?P<sid>\d+):(?P<rev>\d+)\] (?P<alert_msg>.+?) \[\*\*\] \[Classification: (?P<classification>[^\]]+)\] \[Priority: (?P<priority>\d+)\] \{(?P<protocol>\w+)\} (?P<src_ip>[\d.]+):(?P<src_port>\d+) -> (?P<dst_ip>[\d.]+):(?P<dst_port>\d+)"
+
+[[extract.rule]]
+app_name = "suricata"
+gid = "1"
+set = { event_type = "ids_alert" }
