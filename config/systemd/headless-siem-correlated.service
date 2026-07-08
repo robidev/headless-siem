@@ -16,7 +16,10 @@ ExecStart=/home/user/projects/headless-siem/target/release/correlated \
 StandardInput=file:/run/headless-siem/ruled-out.pipe
 StandardOutput=journal
 StandardError=journal
-Restart=on-failure
+# Same reasoning as headless-siem-ruled.service: StandardInput is a pipe
+# fed by ruled, so a ruled restart EOFs this reader and it exits 0 — not
+# a "failure", so Restart=on-failure wouldn't catch it (issue #46).
+Restart=always
 RestartSec=5
 
 # Security hardening

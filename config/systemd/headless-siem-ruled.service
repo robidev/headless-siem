@@ -18,7 +18,11 @@ ExecStart=/home/user/projects/headless-siem/target/release/ruled \
 StandardInput=file:/run/headless-siem/normalized-out.pipe
 StandardOutput=file:/run/headless-siem/ruled-out.pipe
 StandardError=journal
-Restart=on-failure
+# StandardInput is a pipe fed by normalized: any normalized restart closes
+# the write end, ruled hits EOF and exits 0 (clean, not a "failure"), so
+# Restart=on-failure silently never brings it back. Restart=always covers
+# that case too (see implementation-plan.md issue #46).
+Restart=always
 RestartSec=5
 
 # Security hardening
