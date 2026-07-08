@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# soc-restart-pipeline — the single wrapper the analyst role calls to
+# recover a down local logging-pipeline component. Deliberately takes NO
+# arguments: this is invoked from a cron role that processes
+# attacker-controlled log/alert content, so nothing about what it does
+# can be influenced by that content — it always does exactly the same
+# fixed check, against a fixed list of unit names, nothing else.
+#
+# Checks these 5 units in order and restarts only the ones that are not
+# already active (never touches a healthy unit — restarting a *working*
+# service is what caused the pipe-EOF and syslogd-crash incidents this
+# script exists to catch, see implementation-plan.md issues #46/#47):
+#   headless-siem-normalized
+#   headless-siem-indexd
+#   headless-siem-ruled
+#   headless-siem-correlated
+#   headless-siem-alert-watch
+#
+# USAGE:
+#   soc-restart-pipeline
+#
+# Prints one line per unit ("already active" / "was down, restarted,
+# now active" / "was down, restarted, STILL NOT ACTIVE") and a final
+# summary line. Exit 0 if every unit is active by the end (whether it
+# needed restarting or not), exit 1 if any unit is still not active
+# after a restart attempt — the analyst uses this exit code to decide
+# ticket severity and whether to escalate.
+
+set -uo pipefail
+
+UNITS=(
+    headless-siem-normalized
+    headless-siem-indexd
+    headless-siem-ruled
+    headless-siem-correlated
+    headless-siem-alert-watch
+)
+
+overall_ok=0
+restarted_any=0
+
+for unit in "${UNITS[@]}"; do
+    if systemctl is-active --quiet "$unit"; then
+        echo "$unit: already active"
+        continue
+    fi
+
+    echo "$unit: not active, restarting"
+    restarted_any=1
+    systemctl restart "$unit" 2>&1 || true
+    sleep 2
+
+    if systemctl is-active --quiet "$unit"; then
+        echo "$unit: restarted, now active"
+    else
+        echo "$unit: restarted, STILL NOT ACTIVE"
+        overall_ok=1
+    fi
+done
+
+if [ "$restarted_any" -eq 0 ]; then
+    echo "summary: all units were already active, nothing restarted"
+elif [ "$overall_ok" -eq 0 ]; then
+    echo "summary: one or more units were down, all now active after restart"
+else
+    echo "summary: one or more units are still not active after a restart attempt"
+fi
+
+exit "$overall_ok"
