@@ -36,20 +36,61 @@ UNITS=(
     headless-siem-alert-watch
 )
 
-overall_ok=0
-restarted_any=0
+# Rate-limit (runner-and-permissions.md §11.2(1)): a prompt-injected
+# analyst could be steered to trigger restarts repeatedly, and a restart
+# is exactly what caused the syslogd-crash/pipe-EOF incidents (#46/#47).
+# So: refuse to restart again within COOLDOWN of a prior restart, and
+# fire a deterministic soc-notify on every actual restart / rate-limit —
+# deterministic here means it can't be suppressed by whatever got the
+# analyst to call this in the first place.
+COOLDOWN=$((10 * 60))
+STATE_DIR=/var/lib/soc/restart-state
+STATE_FILE="$STATE_DIR/last-restart.epoch"
+# [SOC-ROOT-PATH] decisions.md 5.1b — cross-repo path to the notifier.
+SOC_NOTIFY=/home/user/projects/llm-based-soc/scripts/soc-notify
 
+notify() {  # <priority> <message>
+    [ -x "$SOC_NOTIFY" ] || return 0
+    sudo -u soc-infra "$SOC_NOTIFY" "$1" "$2" >/dev/null 2>&1 || true
+}
+
+# --- pass 1: which units are down (checking is always safe) ---
+down=()
 for unit in "${UNITS[@]}"; do
     if systemctl is-active --quiet "$unit"; then
         echo "$unit: already active"
-        continue
+    else
+        echo "$unit: not active"
+        down+=("$unit")
     fi
+done
 
-    echo "$unit: not active, restarting"
-    restarted_any=1
+if [ "${#down[@]}" -eq 0 ]; then
+    echo "summary: all units were already active, nothing restarted"
+    exit 0
+fi
+
+# --- rate-limit gate: down units, but did we just restart? ---
+now="$(date -u +%s)"
+last=0
+if [ -r "$STATE_FILE" ]; then
+    read -r last < "$STATE_FILE" 2>/dev/null || last=0
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac   # only a clean epoch counts
+fi
+if [ "$last" -gt 0 ] && [ "$((now - last))" -lt "$COOLDOWN" ]; then
+    echo "summary: ${#down[@]} unit(s) down but a restart was attempted $((now - last))s ago (< ${COOLDOWN}s) — RATE-LIMITED, not restarting"
+    notify high "soc-restart-pipeline RATE-LIMITED: ${down[*]} still down $((now - last))s after a prior restart — possible restart loop / injection; human check needed"
+    exit 1
+fi
+
+# --- restart pass ---
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+printf '%s\n' "$now" > "$STATE_FILE" 2>/dev/null || true
+overall_ok=0
+for unit in "${down[@]}"; do
+    echo "$unit: restarting"
     systemctl restart "$unit" 2>&1 || true
     sleep 2
-
     if systemctl is-active --quiet "$unit"; then
         echo "$unit: restarted, now active"
     else
@@ -58,12 +99,12 @@ for unit in "${UNITS[@]}"; do
     fi
 done
 
-if [ "$restarted_any" -eq 0 ]; then
-    echo "summary: all units were already active, nothing restarted"
-elif [ "$overall_ok" -eq 0 ]; then
+if [ "$overall_ok" -eq 0 ]; then
     echo "summary: one or more units were down, all now active after restart"
+    notify high "soc-restart-pipeline restarted (now healthy): ${down[*]}"
 else
     echo "summary: one or more units are still not active after a restart attempt"
+    notify high "soc-restart-pipeline restart FAILED, still down: ${down[*]} — human intervention needed"
 fi
 
 exit "$overall_ok"
