@@ -10,11 +10,12 @@ Type=simple
 User=user
 Environment=HEADLESS_SIEM_ROOT=/home/user/projects/headless-siem
 WorkingDirectory=/home/user/projects/headless-siem
+# Suppress known false positives per config/rules/suppress.toml (see that
+# file's header for the rule grammar / opt-in note).
 ExecStart=/home/user/projects/headless-siem/target/release/ruled \
   --rules /home/user/projects/headless-siem/config/rules \
-  --output /home/user/projects/headless-siem/data/alerts
-  # Add to suppress known false positives (see config/rules/suppress.toml):
-  #   --suppress /home/user/projects/headless-siem/config/rules/suppress.toml
+  --output /home/user/projects/headless-siem/data/alerts \
+  --suppress /home/user/projects/headless-siem/config/rules/suppress.toml
 StandardInput=file:/run/headless-siem/normalized-out.pipe
 StandardOutput=file:/run/headless-siem/ruled-out.pipe
 StandardError=journal
