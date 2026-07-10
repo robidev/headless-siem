@@ -110,7 +110,7 @@ fn next_arg<'a>(it: &mut impl Iterator<Item = &'a str>, flag: &str) -> Result<&'
 }
 
 fn human_bytes(n: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB"];
     let mut v = n as f64;
     let mut i = 0;
     while v >= 1024.0 && i + 1 < UNITS.len() {
@@ -2018,5 +2018,27 @@ mod retention_tests {
         assert!(names.iter().any(|n| n == "sshd.jsonl"), "raw log missing: {names:?}");
         assert!(names.iter().any(|n| n == "2026-06-27-22.db"), "index db missing: {names:?}");
         assert!(names.iter().any(|n| n == "2026-06-27-22.db-wal"), "wal sidecar missing: {names:?}");
+    }
+}
+
+#[cfg(test)]
+mod human_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn sub_tb_values_unchanged() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2048), "2.0 KB");
+        assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+        assert_eq!(human_bytes(7 * 1024_u64.pow(4)), "7.0 TB");
+    }
+
+    #[test]
+    fn petabyte_and_exabyte_scale_rolls_over_past_tb() {
+        // 2048 TB should roll over to 2.0 PB, not stay pinned at the last unit.
+        assert_eq!(human_bytes(2048 * 1024_u64.pow(4)), "2.0 PB");
+        assert_eq!(human_bytes(3 * 1024_u64.pow(6)), "3.0 EB");
     }
 }
