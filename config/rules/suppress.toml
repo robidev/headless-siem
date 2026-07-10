@@ -52,3 +52,26 @@
 # condition = 'cidr_match(src_ip, "199.45.154.0/24")'
 # expires = "2026-10-05"
 # note = "Known scanner range, seen 2026-07-03 shakedown + confirmed live 07-04..07-07"
+
+# Candidates from llm-based-soc/runbooks/filterlog.md (updated 2026-07-10) —
+# 1009-firewall-port-scan fires on every filterlog block; the overwhelming
+# majority of volume is routine multicast/broadcast background noise
+# (IGMP/mDNS/SSDP/MLDv2/NDP), not scan activity. filterlog forwarding was
+# silent 2026-07-04..07-09 (implementation-plan.md #44); this is the first
+# full window of confirmed-clean post-fix production data
+# (2026-07-09T21:11:19Z-2026-07-10T05:48Z, 454 alerts, all to the
+# destinations below). Real port scans target unicast hosts, never these
+# reserved multicast/broadcast addresses, so this can't suppress a real
+# scan finding.
+
+[[suppress]]
+rule_id = "1009-firewall-port-scan"
+condition = 'cidr_match(dst_ip, "224.0.0.0/4") OR dst_ip == "255.255.255.255"'
+expires = "2026-09-08"
+note = "IPv4 multicast/broadcast background noise (IGMP/mDNS/SSDP) — runbooks/filterlog.md"
+
+[[suppress]]
+rule_id = "1009-firewall-port-scan"
+condition = 'dst_ip == "ff02::2" OR dst_ip == "ff02::c" OR dst_ip == "ff02::16" OR dst_ip == "ff02::fb"'
+expires = "2026-09-08"
+note = "IPv6 link-local multicast background noise (all-routers/SSDP/MLDv2/mDNS) — runbooks/filterlog.md. Per-host solicited-node multicast (ff02::1:ff00:0/104, IPv6 NDP/DAD) isn't covered: cidr_match() is IPv4-only (src/ruled/src/suppress.rs), so ff02::/16 can't be expressed as one CIDR here."
