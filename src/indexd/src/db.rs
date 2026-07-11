@@ -40,6 +40,19 @@ impl std::ops::Deref for BucketConn {
 /// final WAL (observed ~3-4 MB, right at the 1000-page auto-checkpoint
 /// threshold) would otherwise sit on disk until the process exits. The
 /// caller is expected to periodically call `evict_idle` to reclaim these.
+///
+/// On eviction (and clean shutdown) a quiescing bucket is switched out of WAL
+/// mode entirely via `PRAGMA journal_mode=DELETE` — not merely checkpointed —
+/// so that once its hour has passed it is a plain rollback-journal file with
+/// no `-wal`/`-shm` sidecars. This is required for read access, not just
+/// tidiness: `siemctl` is run by sandboxed SOC role accounts (a different uid
+/// than the `user` that owns these files, and with no write permission on
+/// them or the index dir). Opening a WAL-mode database *even read-only* forces
+/// SQLite to create/recover the `-shm` shared-memory index, which needs write
+/// access — so a read-only cross-user open of a quiesced WAL-mode bucket fails
+/// with `SQLITE_READONLY` ("attempt to write a readonly database") or
+/// `SQLITE_CANTOPEN`. A rollback-mode file needs no such write. See
+/// `evict_idle` / `close_all`.
 pub struct IndexDb {
     /// Base directory for index files (e.g. `data/index/`).
     index_dir: PathBuf,
@@ -279,14 +292,22 @@ impl IndexDb {
 
     /// Close connections that haven't been written to in at least `idle_after`.
     ///
-    /// Runs an explicit `PRAGMA wal_checkpoint(TRUNCATE)` before dropping
-    /// each idle connection, so its WAL is reclaimed immediately instead of
-    /// relying on SQLite's own close-time checkpoint (which never runs at
-    /// all here otherwise — a bucket that has gone quiet for the rest of
-    /// its life has nothing left to trigger an auto-checkpoint). A checkpoint
-    /// failure is logged and the connection is dropped anyway; a late event
-    /// for that bucket just re-opens it via `open_bucket`. Returns the
-    /// bucket keys that were evicted, for logging.
+    /// Switches each idle bucket out of WAL mode with `PRAGMA
+    /// journal_mode=DELETE` before dropping the connection. This both reclaims
+    /// the WAL immediately (it implicitly checkpoints — SQLite's own close-time
+    /// checkpoint never runs here otherwise, since a bucket that has gone quiet
+    /// for the rest of its life has nothing left to trigger an auto-checkpoint)
+    /// *and*, crucially, rewrites the file header to rollback-journal mode and
+    /// unlinks the `-wal`/`-shm` sidecars — leaving a plain file that a
+    /// different-user, read-only client (`siemctl` run by a sandboxed SOC role)
+    /// can open without needing write access it doesn't have. A bare
+    /// checkpoint(TRUNCATE) would leave the header in WAL mode, so once the
+    /// connection closed the bucket would be an unreadable-cross-user WAL-mode
+    /// `.db` — the root cause of the recurring "siem db unavailable during role
+    /// runs" incidents (SQLITE_READONLY / SQLITE_CANTOPEN). A failure is logged
+    /// and the connection dropped anyway; a late event for that bucket just
+    /// re-opens it (back in WAL mode) via `open_bucket`, and the next eviction
+    /// converts it again. Returns the bucket keys that were evicted, for logging.
     pub fn evict_idle(&self, idle_after: Duration) -> Vec<String> {
         let now = Instant::now();
         let mut connections = self.connections.lock().unwrap();
@@ -298,8 +319,8 @@ impl IndexDb {
 
         for key in &idle_keys {
             if let Some(entry) = connections.get(key) {
-                if let Err(e) = entry.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-                    eprintln!("[indexd] checkpoint failed for idle bucket {}: {}", key, e);
+                if let Err(e) = entry.conn.execute_batch("PRAGMA journal_mode=DELETE;") {
+                    eprintln!("[indexd] journal_mode=DELETE failed for idle bucket {}: {}", key, e);
                 }
             }
             connections.remove(key);
@@ -310,12 +331,14 @@ impl IndexDb {
 
     /// Close all open connections gracefully.
     ///
-    /// Checkpoints each bucket's WAL first (same as `evict_idle`), so a
-    /// clean shutdown never leaves a stranded WAL file behind either.
+    /// Switches each bucket out of WAL mode (`PRAGMA journal_mode=DELETE`, same
+    /// as `evict_idle`), so a clean shutdown never leaves a stranded WAL file —
+    /// or, more importantly, a bare WAL-mode `.db` a cross-user read-only reader
+    /// can't open — behind either.
     pub fn close_all(&self) {
         let mut connections = self.connections.lock().unwrap();
         for entry in connections.values() {
-            let _ = entry.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            let _ = entry.conn.execute_batch("PRAGMA journal_mode=DELETE;");
         }
         connections.clear();
     }
@@ -534,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn test_evict_idle_checkpoints_truncates_wal_and_preserves_data() {
+    fn test_evict_idle_converts_out_of_wal_mode_and_preserves_data() {
         let tmp = TempDir::new();
         let fields = default_fields();
         let db = IndexDb::new(&tmp.path, &fields);
@@ -546,6 +569,7 @@ mod tests {
         event.insert("byte_offset".to_string(), "0".to_string());
         db.insert_batch(&key, &[event]).unwrap();
 
+        let db_path = tmp.path.join("index").join("2026-06-22-08.db");
         let wal_path = tmp.path.join("index").join("2026-06-22-08.db-wal");
         assert!(wal_path.exists(), "WAL-mode SQLite should create a -wal file on first write");
 
@@ -558,10 +582,21 @@ mod tests {
             "connection should be dropped after eviction"
         );
 
-        if wal_path.exists() {
-            let len = std::fs::metadata(&wal_path).unwrap().len();
-            assert_eq!(len, 0, "checkpoint(TRUNCATE) should shrink the WAL to empty");
-        }
+        // The bucket must now be a plain rollback-journal file: journal_mode=DELETE
+        // rewrites the header and removes the -wal sidecar. This is what makes it
+        // openable read-only by a different, unprivileged user (the whole point of
+        // the fix — see the struct/evict_idle docs).
+        assert!(
+            !wal_path.exists(),
+            "journal_mode=DELETE should remove the -wal sidecar, leaving a plain file"
+        );
+        // Read the persistent journal-mode byte straight from the header:
+        // offset 18 == 1 means rollback (DELETE/TRUNCATE/PERSIST), 2 means WAL.
+        let header = std::fs::read(&db_path).unwrap();
+        assert_eq!(
+            header[18], 1,
+            "db header must be rollback-journal mode (1), not WAL (2), after eviction"
+        );
 
         // Data survives: re-opening the bucket sees the same row, not a
         // fresh empty table.
@@ -577,6 +612,56 @@ mod tests {
         }
 
         db.close_all();
+    }
+
+    #[test]
+    fn test_evicted_bucket_opens_read_only_without_write_access() {
+        // Regression test for the "siem db unavailable during role runs" bug:
+        // a quiesced bucket must be openable read-only by a client that has NO
+        // write access to the file or its directory. A WAL-mode file fails this
+        // (read-only open still needs to create/recover the -shm); a rollback
+        // file passes. We approximate "no write access" by stripping write bits
+        // from the file and its parent dir, then opening read-only.
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new();
+        let fields = default_fields();
+        let db = IndexDb::new(&tmp.path, &fields);
+        let key = db.open_bucket("2026/06/22/08").unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("timestamp".to_string(), "Jun 22 08:55:03".to_string());
+        event.insert("byte_offset".to_string(), "0".to_string());
+        db.insert_batch(&key, &[event]).unwrap();
+        db.evict_idle(Duration::from_secs(0)); // quiesce -> rollback mode
+        db.close_all();
+
+        let index_dir = tmp.path.join("index");
+        let db_path = index_dir.join("2026-06-22-08.db");
+
+        // Strip write permission from the db file and its directory, so a
+        // read-only open cannot fall back to creating a -shm / -wal.
+        let mut dir_perm = std::fs::metadata(&index_dir).unwrap().permissions();
+        dir_perm.set_mode(0o555);
+        std::fs::set_permissions(&index_dir, dir_perm).unwrap();
+        let mut file_perm = std::fs::metadata(&db_path).unwrap().permissions();
+        file_perm.set_mode(0o444);
+        std::fs::set_permissions(&db_path, file_perm).unwrap();
+
+        let opened = Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        );
+        // Restore write perms before any assert so TempDir::drop can clean up.
+        let mut dir_perm = std::fs::metadata(&index_dir).unwrap().permissions();
+        dir_perm.set_mode(0o755);
+        std::fs::set_permissions(&index_dir, dir_perm).unwrap();
+
+        let conn = opened.expect("rollback-mode bucket must open read-only without write access");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
