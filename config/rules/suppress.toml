@@ -46,18 +46,18 @@
 # condition = 'cidr_match(src_ip, "85.217.140.0/24")'
 # expires = "2026-10-05"
 # note = "Known scanner range, seen 2026-07-03 shakedown + confirmed live 07-04..07-07"
-#
-# [[suppress]]
-# rule_id = "1007-haproxy-tls-probe"
-# condition = 'cidr_match(src_ip, "199.45.154.0/24")'
-# expires = "2026-10-05"
-# note = "Known scanner range, seen 2026-07-03 shakedown + confirmed live 07-04..07-07"
 
 [[suppress]]
 rule_id = "1007-haproxy-tls-probe"
 condition = 'cidr_match(src_ip, "93.152.208.0/24")'
 expires = "2026-10-05"
 note = "Scanner range crossed runbooks/haproxy.md's 3+-separate-days threshold 2026-07-11 (Jul 5, Jul 7, Jul 11 — tuner-dev/20260711T143406.626); all tls_handshake_failure against proxmox_reverse_proxy, no successful handshake. Same expires horizon as the sibling ranges seeded from the same table."
+
+[[suppress]]
+rule_id = "1007-haproxy-tls-probe"
+condition = 'cidr_match(src_ip, "199.45.154.0/24")'
+expires = "2026-10-05"
+note = "Scanner range crossed runbooks/haproxy.md's 3+-separate-days threshold 2026-07-11 (Jul 1, Jul 5, Jul 11 — tuner-dev/20260711T185836.844, operator-filed); single src_ip 199.45.154.142, all tls_handshake_failure against proxmox_reverse_proxy, no successful handshake. Same expires horizon as the sibling ranges seeded from the same table."
 
 # Candidates from llm-based-soc/runbooks/filterlog.md (updated 2026-07-10) —
 # 1009-firewall-port-scan fires on every filterlog block; the overwhelming
