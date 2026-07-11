@@ -1,7 +1,9 @@
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use crate::render::{Record, Renderer, Val};
 
@@ -139,13 +141,37 @@ fn resolve_raw_line(data_dir: &Path, raw_file: &str, byte_offset: u64) -> Result
     }
 }
 
+/// Number of attempts `open_bucket_conn` makes before giving up on a
+/// `SQLITE_CANTOPEN` error. See its doc comment for why this exists.
+const OPEN_BUCKET_MAX_ATTEMPTS: u32 = 4;
+
 /// Open a single SQLite index bucket read-only and register the `siemctl` UDFs
 /// (`cidr_match`, `raw_contains`) on the connection, so a compiled query that
 /// references them can run. `data_dir` is captured by `raw_contains`.
+///
+/// Retries with a short backoff on `SQLITE_CANTOPEN` ("unable to open database
+/// file"): `indexd` occasionally rotates/checkpoints a bucket file at the
+/// instant a reader opens it, producing this error transiently even though
+/// the file is present a moment later (implementation-plan.md issue #43).
+/// Other errors (e.g. malformed DB) fail immediately, unretried.
 pub fn open_bucket_conn(db_path: &Path, data_dir: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    register_udfs(&conn, data_dir)?;
-    Ok(conn)
+    let mut delay = Duration::from_millis(200);
+    for attempt in 1..=OPEN_BUCKET_MAX_ATTEMPTS {
+        match Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(conn) => {
+                register_udfs(&conn, data_dir)?;
+                return Ok(conn);
+            }
+            Err(e) if attempt < OPEN_BUCKET_MAX_ATTEMPTS
+                && e.sqlite_error_code() == Some(ErrorCode::CannotOpen) =>
+            {
+                thread::sleep(delay);
+                delay *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("loop always returns by the last attempt")
 }
 
 /// Run a compiled row-mode query against one open bucket connection and emit the
@@ -717,6 +743,34 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn open_bucket_conn_retries_transient_cantopen_then_succeeds() {
+        let tmp = TempDir::new();
+        let db = tmp.path.join("2026-06-22-08.db");
+        // The file doesn't exist yet, so the first attempt hits SQLITE_CANTOPEN.
+        // Create it shortly after — before the first backoff (200ms) elapses —
+        // so the retry loop's second attempt should find it and succeed.
+        let db2 = db.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            Connection::open(&db2).unwrap();
+        });
+        let conn = open_bucket_conn(&db, &tmp.path);
+        assert!(conn.is_ok(), "expected recovery once the file appears: {:?}", conn.err());
+    }
+
+    #[test]
+    fn open_bucket_conn_gives_up_after_max_attempts_on_persistent_cantopen() {
+        let tmp = TempDir::new();
+        // Parent directory doesn't exist and nothing will create it — CANTOPEN
+        // persists, so open_bucket_conn must eventually return the error
+        // instead of retrying forever.
+        let db = tmp.path.join("does-not-exist").join("2026-06-22-08.db");
+        let result = open_bucket_conn(&db, &tmp.path);
+        let err = result.expect_err("expected CANTOPEN to persist and be returned");
+        assert_eq!(err.sqlite_error_code(), Some(ErrorCode::CannotOpen));
     }
 
     #[test]
