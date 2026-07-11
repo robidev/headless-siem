@@ -851,6 +851,7 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
     let mut raw: Option<Option<String>> = None; // Some(None)=--raw no arg; Some(Some(s))=--raw SUBSTRING
     let mut after: Option<time::HourBucket> = None;
     let mut before: Option<time::HourBucket> = None;
+    let mut window: Option<String> = None;
     let mut format = render::Format::Json;
 
     let mut it = args.iter().map(String::as_str).peekable();
@@ -882,6 +883,7 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
                         .ok_or_else(|| format!("invalid --before '{s}' (YYYY-MM-DDTHH)"))?,
                 );
             }
+            "--window" | "-w" => window = Some(next_arg(&mut it, arg)?.to_string()),
             "--help" | "-h" => {
                 print_search_help();
                 return Ok(0);
@@ -891,6 +893,15 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
                 return Ok(1);
             }
         }
+    }
+
+    if let Some(w) = window {
+        if after.is_some() || before.is_some() {
+            return Err("--window cannot be combined with --after/--before".into());
+        }
+        let win = time::parse_window(&w, chrono::Utc::now())?;
+        after = Some(time::HourBucket::from_datetime(win.start));
+        before = Some(time::HourBucket::from_datetime(win.end));
     }
 
     if !data_dir.is_dir() {
@@ -944,6 +955,12 @@ fn print_search_help() {
          \x20                        the very latest, not-yet-indexed events. No DSL parsing.\n\
          \x20 --after  YYYY-MM-DDTHH Start of time range (bucket pruning)\n\
          \x20 --before YYYY-MM-DDTHH End of time range (bucket pruning)\n\
+         \x20 --window W             Time range as a relative duration ending now\n\
+         \x20                        ('10m','6h','24h','2d') or an explicit\n\
+         \x20                        'start..end' range (same format as --after/\n\
+         \x20                        --before). Same bucket-pruning precision as\n\
+         \x20                        --after/--before, just less typing. Mutually\n\
+         \x20                        exclusive with --after/--before.\n\
          \x20 --format FMT           Output format: json (default), tsv, tsv-noheader\n\
          \x20 --data-dir DIR         Data directory (default: ./data)\n\
          \x20 --help                 Show this help\n\
@@ -982,6 +999,7 @@ fn cmd_alerts(args: &[String]) -> Result<i32> {
     let mut dsl: Option<String> = None;
     let mut after: Option<time::HourBucket> = None;
     let mut before: Option<time::HourBucket> = None;
+    let mut window: Option<String> = None;
     let mut format = render::Format::Json;
     let mut correlated_only = false;
     let mut show_all = false;
@@ -1008,6 +1026,7 @@ fn cmd_alerts(args: &[String]) -> Result<i32> {
                         .ok_or_else(|| format!("invalid --before '{s}' (YYYY-MM-DDTHH)"))?,
                 );
             }
+            "--window" | "-w" => window = Some(next_arg(&mut it, arg)?.to_string()),
             "--help" | "-h" => {
                 print_alerts_help();
                 return Ok(0);
@@ -1017,6 +1036,15 @@ fn cmd_alerts(args: &[String]) -> Result<i32> {
                 return Ok(1);
             }
         }
+    }
+
+    if let Some(w) = window {
+        if after.is_some() || before.is_some() {
+            return Err("--window cannot be combined with --after/--before".into());
+        }
+        let win = time::parse_window(&w, chrono::Utc::now())?;
+        after = Some(time::HourBucket::from_datetime(win.start));
+        before = Some(time::HourBucket::from_datetime(win.end));
     }
 
     if !data_dir.is_dir() {
@@ -1127,6 +1155,12 @@ fn print_alerts_help() {
          \x20 --all                  Include acked alerts too (default: hidden)\n\
          \x20 --after  YYYY-MM-DDTHH Start of time range (bucket pruning)\n\
          \x20 --before YYYY-MM-DDTHH End of time range (bucket pruning)\n\
+         \x20 --window W             Time range as a relative duration ending now\n\
+         \x20                        ('10m','6h','24h','2d') or an explicit\n\
+         \x20                        'start..end' range (same format as --after/\n\
+         \x20                        --before). Same bucket-pruning precision as\n\
+         \x20                        --after/--before, just less typing. Mutually\n\
+         \x20                        exclusive with --after/--before.\n\
          \x20 --format FMT           Output format: json (default), tsv, tsv-noheader\n\
          \x20 --data-dir DIR         Data directory (default: ./data)\n\
          \x20 --help                 Show this help\n\

@@ -142,8 +142,21 @@ fn resolve_raw_line(data_dir: &Path, raw_file: &str, byte_offset: u64) -> Result
 }
 
 /// Number of attempts `open_bucket_conn` makes before giving up on a
-/// `SQLITE_CANTOPEN` error. See its doc comment for why this exists.
-const OPEN_BUCKET_MAX_ATTEMPTS: u32 = 4;
+/// `SQLITE_CANTOPEN` error, and the starting backoff delay (doubles each
+/// attempt). See `open_bucket_conn`'s doc comment for why this exists.
+///
+/// 9 attempts starting at 200ms, doubling, sums to ~51s worst case
+/// (200ms+400ms+800ms+1.6s+3.2s+6.4s+12.8s+25.6s). Bumped from the
+/// original 4 attempts / ~1.4s (2026-07-11, decisions.md) once that
+/// budget turned out to be sized against a synthetic 100ms-delay unit
+/// test rather than the real race: the incident that originally motivated
+/// this retry (implementation-plan.md issue #43) took a human-observed
+/// ~3 minutes to self-heal, not sub-second. ~51s doesn't cover that full
+/// 3-minute tail, but it's a large jump from 1.4s while still bounded —
+/// `siemctl` is called synchronously inline in agent runs, so this is a
+/// real tradeoff against blocking a run, not just "bigger is safer".
+const OPEN_BUCKET_MAX_ATTEMPTS: u32 = 9;
+const OPEN_BUCKET_INITIAL_DELAY: Duration = Duration::from_millis(200);
 
 /// Open a single SQLite index bucket read-only and register the `siemctl` UDFs
 /// (`cidr_match`, `raw_contains`) on the connection, so a compiled query that
@@ -155,14 +168,31 @@ const OPEN_BUCKET_MAX_ATTEMPTS: u32 = 4;
 /// the file is present a moment later (implementation-plan.md issue #43).
 /// Other errors (e.g. malformed DB) fail immediately, unretried.
 pub fn open_bucket_conn(db_path: &Path, data_dir: &Path) -> rusqlite::Result<Connection> {
-    let mut delay = Duration::from_millis(200);
-    for attempt in 1..=OPEN_BUCKET_MAX_ATTEMPTS {
+    open_bucket_conn_with_retry(
+        db_path,
+        data_dir,
+        OPEN_BUCKET_MAX_ATTEMPTS,
+        OPEN_BUCKET_INITIAL_DELAY,
+    )
+}
+
+/// Retry-policy-parameterized core of `open_bucket_conn` — split out so
+/// tests can exercise "gives up after max attempts" with a small attempt
+/// count/delay instead of the real ~51s production budget.
+fn open_bucket_conn_with_retry(
+    db_path: &Path,
+    data_dir: &Path,
+    max_attempts: u32,
+    initial_delay: Duration,
+) -> rusqlite::Result<Connection> {
+    let mut delay = initial_delay;
+    for attempt in 1..=max_attempts {
         match Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
             Ok(conn) => {
                 register_udfs(&conn, data_dir)?;
                 return Ok(conn);
             }
-            Err(e) if attempt < OPEN_BUCKET_MAX_ATTEMPTS
+            Err(e) if attempt < max_attempts
                 && e.sqlite_error_code() == Some(ErrorCode::CannotOpen) =>
             {
                 thread::sleep(delay);
@@ -766,9 +796,13 @@ mod tests {
         let tmp = TempDir::new();
         // Parent directory doesn't exist and nothing will create it — CANTOPEN
         // persists, so open_bucket_conn must eventually return the error
-        // instead of retrying forever.
+        // instead of retrying forever. Uses the parameterized core with a
+        // small attempt count/delay (not the real ~51s production budget) so
+        // this test proves the same "gives up eventually" logic in
+        // milliseconds instead of tens of seconds.
         let db = tmp.path.join("does-not-exist").join("2026-06-22-08.db");
-        let result = open_bucket_conn(&db, &tmp.path);
+        let result =
+            open_bucket_conn_with_retry(&db, &tmp.path, 3, Duration::from_millis(5));
         let err = result.expect_err("expected CANTOPEN to persist and be returned");
         assert_eq!(err.sqlite_error_code(), Some(ErrorCode::CannotOpen));
     }
