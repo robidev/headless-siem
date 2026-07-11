@@ -4,7 +4,10 @@
 #
 # Reads /etc/headless-siem/.deployed-revisions (written by
 # config/systemd/install.sh and scripts/redeploy-binary) and compares
-# each binary's stamped commit against this checkout's HEAD. Also checks,
+# each binary's stamped commit against the latest commit that actually
+# touched that crate (its src/ dir, or Cargo.lock/Cargo.toml) — not
+# raw repo HEAD, so an unrelated commit (docs, a different crate,
+# config/rules) doesn't flag every binary as stale. Also checks,
 # for the 4 systemd-managed binaries, whether the *running* process is
 # actually using the on-disk binary (an `install`-style atomic
 # unlink+rename leaves an already-running process on its old inode until
@@ -61,14 +64,15 @@ for bin in normalized indexd ruled correlated siemctl; do
         deployed="$(echo "$line" | cut -d= -f2 | awk '{print $1}')"
         deployed_ts="$(echo "$line" | awk '{print $2}')"
 
-        if [[ "$deployed" == "$HEAD" ]]; then
-            line_status="up to date (${deployed:0:8}, deployed ${deployed_ts})"
+        crate_head="$(git -C "$PROJECT_ROOT" log -1 --format=%H -- "src/${bin}" Cargo.lock Cargo.toml 2>/dev/null)"
+        if [[ -z "$crate_head" || "$deployed" == "$crate_head" ]]; then
+            line_status="up to date (deployed ${deployed:0:8} @ ${deployed_ts}, no relevant commits since)"
         else
-            behind="$(git -C "$PROJECT_ROOT" rev-list --count "${deployed}..${HEAD}" 2>/dev/null)"
+            behind="$(git -C "$PROJECT_ROOT" rev-list --count "${deployed}..${crate_head}" -- "src/${bin}" Cargo.lock Cargo.toml 2>/dev/null)"
             if [[ -z "$behind" ]]; then
                 line_status="STALE — deployed commit ${deployed:0:8} not found in this repo's history (force-push or different checkout?)"
             else
-                line_status="STALE — deployed ${deployed:0:8} (${deployed_ts}), HEAD is ${behind} commit(s) ahead"
+                line_status="STALE — deployed ${deployed:0:8} (${deployed_ts}), ${behind} relevant commit(s) since (latest: ${crate_head:0:8})"
             fi
             status=1
         fi
