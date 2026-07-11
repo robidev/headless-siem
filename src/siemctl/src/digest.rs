@@ -322,8 +322,10 @@ pub struct VolumeRow {
     pub count: u64,
     pub baseline: u64,
     pub delta_pct: Option<f64>,
-    /// `"new"` (zero baseline) or `"spike"` (beyond the configured
-    /// threshold); `None` for a normal row.
+    /// `"new"` (zero baseline), `"spike"` (increase beyond the configured
+    /// threshold), or `"drop"` (decrease beyond the threshold, including a
+    /// baseline source going silent — a -100% delta is a silence, not a
+    /// spike, so it gets its own label); `None` for a normal row.
     pub flag: Option<String>,
 }
 
@@ -361,8 +363,13 @@ pub fn build_volume(
                 (None, flag)
             } else {
                 let pct = ((count as f64 - baseline as f64) / baseline as f64) * 100.0;
-                let flag =
-                    if pct.abs() > cfg.spike_threshold_pct { Some("spike".to_string()) } else { None };
+                let flag = if pct > cfg.spike_threshold_pct {
+                    Some("spike".to_string())
+                } else if pct < -cfg.spike_threshold_pct {
+                    Some("drop".to_string())
+                } else {
+                    None
+                };
                 (Some(pct), flag)
             };
             VolumeRow { source, count, baseline, delta_pct, flag }
@@ -1353,6 +1360,40 @@ mod tests {
         assert_eq!(openvpn.baseline, 1);
         assert_eq!(openvpn.delta_pct, Some(800.0));
         assert_eq!(openvpn.flag.as_deref(), Some("spike"));
+    }
+
+    #[test]
+    fn volume_flags_drop_not_spike_when_source_goes_silent() {
+        let tmp = TempDir::new();
+        let idx = tmp.path.join("index");
+        std::fs::create_dir_all(&idx).unwrap();
+
+        // Window has zero events for this source; baseline had some — a
+        // total silence, not a volume increase, so it must not be labeled
+        // "spike" (see ticket tuner-dev/20260711T175421.845).
+        let win_db = idx.join("2026-06-29-20.db");
+        let conn = Connection::open(&win_db).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        drop(conn);
+        let base_db = idx.join("2026-06-29-19.db");
+        let conn = Connection::open(&base_db).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        for i in 0..2 {
+            conn.execute(
+                "INSERT INTO events VALUES (?1, 'anacron')",
+                [format!("raw/2026/06/29/19/{:02}/00/anacron.jsonl", i)],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let win = Window { start: ymdhms(2026, 6, 29, 20, 0, 0), end: ymdhms(2026, 6, 29, 21, 0, 0) };
+        let rows = build_volume(&tmp.path, &win, &DigestConfig::default(), false).unwrap();
+        let anacron = rows.iter().find(|r| r.source == "anacron").unwrap();
+        assert_eq!(anacron.count, 0);
+        assert_eq!(anacron.baseline, 2);
+        assert_eq!(anacron.delta_pct, Some(-100.0));
+        assert_eq!(anacron.flag.as_deref(), Some("drop"));
     }
 
     // ── network ──────────────────────────────────────────────────────────
