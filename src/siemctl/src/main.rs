@@ -740,6 +740,14 @@ fn cmd_stats_trend(
 
     let mut group_data: Vec<BTreeMap<String, u64>> = vec![BTreeMap::new(); group_starts.len()];
     let mut row_totals: BTreeMap<String, u64> = BTreeMap::new();
+    // Rows whose group-by key (event_type) came back empty aren't shown as
+    // their own row (an unlabeled row would be meaningless), but their
+    // events are still real — tracked separately so a source with no
+    // dedicated parser (every event_type empty) doesn't get reported as
+    // having no data at all when it actually has plenty, just none of it
+    // groupable this way.
+    let mut ungrouped_group_totals: Vec<u64> = vec![0; group_starts.len()];
+    let mut ungrouped_total: u64 = 0;
 
     for db_path in &dbs {
         let Some(name) = db_path.file_name().and_then(|n| n.to_str()) else { continue };
@@ -757,6 +765,8 @@ fn cmd_stats_trend(
         for (key, count) in acc {
             let row_key = key.into_iter().next().unwrap_or_default();
             if row_key.is_empty() {
+                ungrouped_group_totals[group_idx] += count;
+                ungrouped_total += count;
                 continue;
             }
             *group_bucket.entry(row_key.clone()).or_default() += count;
@@ -765,8 +775,25 @@ fn cmd_stats_trend(
     }
 
     if row_totals.is_empty() {
-        println!("(no data in range)");
-        return Ok(1);
+        if source.is_some() && ungrouped_total > 0 {
+            // Every event for this source has an empty event_type (no
+            // dedicated parser) — fall back to one undifferentiated
+            // "total" row instead of claiming there's no data at all.
+            println!(
+                "note: '{}' events have no populated event_type (no dedicated \
+                 parser) — showing total volume per bucket instead of a \
+                 per-type breakdown",
+                source.unwrap()
+            );
+            let synthetic = "(total, ungrouped)".to_string();
+            row_totals.insert(synthetic.clone(), ungrouped_total);
+            for (gd, count) in group_data.iter_mut().zip(ungrouped_group_totals.iter()) {
+                gd.insert(synthetic.clone(), *count);
+            }
+        } else {
+            println!("(no data in range)");
+            return Ok(1);
+        }
     }
 
     let mut rows: Vec<String> = row_totals.keys().cloned().collect();
