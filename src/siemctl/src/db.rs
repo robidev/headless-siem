@@ -143,30 +143,37 @@ fn resolve_raw_line(data_dir: &Path, raw_file: &str, byte_offset: u64) -> Result
 
 /// Number of attempts `open_bucket_conn` makes before giving up on a
 /// `SQLITE_CANTOPEN` error, and the starting backoff delay (doubles each
-/// attempt). See `open_bucket_conn`'s doc comment for why this exists.
+/// attempt). 3 attempts at 200ms doubling = ~600ms worst case (200ms + 400ms).
 ///
-/// 9 attempts starting at 200ms, doubling, sums to ~51s worst case
-/// (200ms+400ms+800ms+1.6s+3.2s+6.4s+12.8s+25.6s). Bumped from the
-/// original 4 attempts / ~1.4s (2026-07-11, decisions.md) once that
-/// budget turned out to be sized against a synthetic 100ms-delay unit
-/// test rather than the real race: the incident that originally motivated
-/// this retry (implementation-plan.md issue #43) took a human-observed
-/// ~3 minutes to self-heal, not sub-second. ~51s doesn't cover that full
-/// 3-minute tail, but it's a large jump from 1.4s while still bounded —
-/// `siemctl` is called synchronously inline in agent runs, so this is a
-/// real tradeoff against blocking a run, not just "bigger is safer".
-const OPEN_BUCKET_MAX_ATTEMPTS: u32 = 9;
+/// Deliberately small. The "siem db unavailable during role runs" incidents
+/// (implementation-plan.md issue #43 and its follow-ups) were long
+/// *misdiagnosed* as a transient indexd bucket-rotation race and this retry
+/// was once inflated to 9 attempts / ~51s chasing an imagined "~3-minute
+/// self-heal." That is NOT what those incidents were: their real cause was
+/// opening a WAL-mode bucket read-only as a different, non-owner uid (a
+/// sandboxed SOC role with no write on the `user`-owned files/dir), which
+/// fails deterministically with `SQLITE_READONLY`/`SQLITE_CANTOPEN` because a
+/// WAL open must create/recover the `-shm`/`-wal`. Fixed at the source: indexd
+/// now converts quiesced buckets out of WAL mode (`journal_mode=DELETE`) so
+/// they open read-only with no write needed. Retrying a permission failure
+/// never helped — it only stalled the synchronous agent run. What survives
+/// here is cheap insurance against a genuine sub-second *filesystem* open race
+/// (e.g. retention unlinking a bucket between the caller's `is_file()` check
+/// and the open), nothing more.
+const OPEN_BUCKET_MAX_ATTEMPTS: u32 = 3;
 const OPEN_BUCKET_INITIAL_DELAY: Duration = Duration::from_millis(200);
 
 /// Open a single SQLite index bucket read-only and register the `siemctl` UDFs
 /// (`cidr_match`, `raw_contains`) on the connection, so a compiled query that
 /// references them can run. `data_dir` is captured by `raw_contains`.
 ///
-/// Retries with a short backoff on `SQLITE_CANTOPEN` ("unable to open database
-/// file"): `indexd` occasionally rotates/checkpoints a bucket file at the
-/// instant a reader opens it, producing this error transiently even though
-/// the file is present a moment later (implementation-plan.md issue #43).
-/// Other errors (e.g. malformed DB) fail immediately, unretried.
+/// Retries a few times with a short backoff on `SQLITE_CANTOPEN` ("unable to
+/// open database file") to ride out a genuine sub-second filesystem open race
+/// (e.g. retention unlinking a bucket between the caller's `is_file()` check
+/// and this open). This is NOT the fix for the historical "db unavailable
+/// during role runs" incidents — see `OPEN_BUCKET_MAX_ATTEMPTS` for that story.
+/// Other errors (including `SQLITE_READONLY`) fail immediately, unretried:
+/// retrying a permission failure can't help.
 pub fn open_bucket_conn(db_path: &Path, data_dir: &Path) -> rusqlite::Result<Connection> {
     open_bucket_conn_with_retry(
         db_path,
