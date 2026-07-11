@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# check-deploy-drift — is what's running in production the same code
+# that's merged to master?
+#
+# Reads /etc/headless-siem/.deployed-revisions (written by
+# config/systemd/install.sh and scripts/redeploy-binary) and compares
+# each binary's stamped commit against this checkout's HEAD. Also checks,
+# for the 4 systemd-managed binaries, whether the *running* process is
+# actually using the on-disk binary (an `install`-style atomic
+# unlink+rename leaves an already-running process on its old inode until
+# the service is restarted — "installed" and "live" aren't the same
+# thing).
+#
+# Read-only. Needs root only to read /proc/<pid>/exe for services
+# running as a different user; run with sudo for the full picture.
+#
+# USAGE:
+#   scripts/check-deploy-drift
+#
+# Exit 0: everything deployed matches HEAD and every running process
+#         matches its on-disk binary.
+# Exit 1: something is stale or a service needs a restart — read the
+#         per-line detail above the summary.
+
+set -uo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REV_FILE=/etc/headless-siem/.deployed-revisions
+
+HEAD="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)"
+if [[ -z "$HEAD" ]]; then
+    echo "ERROR: couldn't resolve HEAD in $PROJECT_ROOT"
+    exit 2
+fi
+HEAD_SHORT="${HEAD:0:8}"
+
+if [[ ! -f "$REV_FILE" ]]; then
+    echo "No deployed-revision record at $REV_FILE — nothing has been"
+    echo "deployed via install.sh or redeploy-binary yet, or this host"
+    echo "predates this check. Can't compare."
+    exit 1
+fi
+
+declare -A UNIT_FOR=(
+    [normalized]=headless-siem-normalized
+    [indexd]=headless-siem-indexd
+    [ruled]=headless-siem-ruled
+    [correlated]=headless-siem-correlated
+)
+
+status=0
+echo "HEAD is ${HEAD_SHORT} ($(git -C "$PROJECT_ROOT" log -1 --format=%cs))"
+echo ""
+
+for bin in normalized indexd ruled correlated siemctl; do
+    line="$(grep "^${bin}=" "$REV_FILE" || true)"
+    if [[ -z "$line" ]]; then
+        line_status="NO RECORD — not deployed via install.sh/redeploy-binary since tracking started (may still be running, just from before this stamp existed; can't tell if it's current)"
+        status=1
+    else
+        deployed="$(echo "$line" | cut -d= -f2 | awk '{print $1}')"
+        deployed_ts="$(echo "$line" | awk '{print $2}')"
+
+        if [[ "$deployed" == "$HEAD" ]]; then
+            line_status="up to date (${deployed:0:8}, deployed ${deployed_ts})"
+        else
+            behind="$(git -C "$PROJECT_ROOT" rev-list --count "${deployed}..${HEAD}" 2>/dev/null)"
+            if [[ -z "$behind" ]]; then
+                line_status="STALE — deployed commit ${deployed:0:8} not found in this repo's history (force-push or different checkout?)"
+            else
+                line_status="STALE — deployed ${deployed:0:8} (${deployed_ts}), HEAD is ${behind} commit(s) ahead"
+            fi
+            status=1
+        fi
+    fi
+
+    restart_note=""
+    unit="${UNIT_FOR[$bin]:-}"
+    if [[ -n "$unit" ]]; then
+        pid="$(systemctl show -p MainPID --value "${unit}.service" 2>/dev/null || echo 0)"
+        on_disk="/usr/local/bin/${unit}"
+        if [[ "$pid" != "0" && -n "$pid" && -e "/proc/$pid/exe" && -e "$on_disk" ]]; then
+            if ! cmp -s "/proc/$pid/exe" "$on_disk" 2>/dev/null; then
+                restart_note=" | RUNNING PROCESS != on-disk binary — needs 'systemctl restart ${unit}.service'"
+                status=1
+            fi
+        fi
+    fi
+
+    echo "  $bin: ${line_status}${restart_note}"
+done
+
+echo ""
+if [[ "$status" -eq 0 ]]; then
+    echo "summary: production matches HEAD, all running processes current."
+else
+    echo "summary: drift found — see above."
+fi
+exit "$status"

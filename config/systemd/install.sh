@@ -62,6 +62,24 @@ install -m 755 "$CORRELATED" /usr/local/bin/headless-siem-correlated
 install -m 755 "$SIEMCTL" /usr/local/bin/siemctl
 echo "  Done."
 
+# ── Record deployed revision ──────────────────────────────────────────
+# Stamps the git commit each binary was built from, so `scripts/
+# check-deploy-drift` can later tell "merged to master" apart from
+# "actually running in production" — a gap that's bitten this project
+# more than once (a merged fix sitting unbuilt/uninstalled while
+# investigation continued against the stale binary).
+echo ""
+echo "Recording deployed revision..."
+mkdir -p /etc/headless-siem
+GIT_HEAD="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+DEPLOY_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+{
+    for bin in normalized indexd ruled correlated siemctl; do
+        echo "${bin}=${GIT_HEAD} ${DEPLOY_TS}"
+    done
+} > /etc/headless-siem/.deployed-revisions
+echo "  Done (all 5 binaries stamped at ${GIT_HEAD:0:8})."
+
 # ── Install config ────────────────────────────────────────────────────
 echo ""
 echo "Installing config to /etc/headless-siem/..."
