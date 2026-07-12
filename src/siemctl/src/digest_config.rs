@@ -30,6 +30,7 @@ struct VolumeToml {
 #[derive(Debug, Deserialize, Default)]
 struct CoverageToml {
     unparsed_min_events: Option<u64>,
+    coverage_lookback_hours: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -86,6 +87,9 @@ fn merge(raw: RawDigestToml, defaults: DigestConfig) -> DigestConfig {
         spike_threshold_pct: volume.spike_threshold_pct.unwrap_or(defaults.spike_threshold_pct),
         new_source_always_flag: volume.new_source_always_flag.unwrap_or(defaults.new_source_always_flag),
         unparsed_min_events: coverage.unparsed_min_events.unwrap_or(defaults.unparsed_min_events),
+        coverage_lookback_hours: coverage
+            .coverage_lookback_hours
+            .unwrap_or(defaults.coverage_lookback_hours),
         concentration_threshold_pct: alerts
             .concentration_threshold_pct
             .unwrap_or(defaults.concentration_threshold_pct),
@@ -120,6 +124,7 @@ mod tests {
         let defaults = DigestConfig::default();
         assert_eq!(cfg.spike_threshold_pct, defaults.spike_threshold_pct);
         assert_eq!(cfg.unparsed_min_events, defaults.unparsed_min_events);
+        assert_eq!(cfg.coverage_lookback_hours, defaults.coverage_lookback_hours);
         assert_eq!(cfg.wan_interface, defaults.wan_interface);
     }
 
@@ -149,6 +154,7 @@ new_source_always_flag = true
 
 [coverage]
 unparsed_min_events = 50
+coverage_lookback_hours = 30
 
 [network]
 new_destination_always_flag = true
@@ -160,6 +166,7 @@ concentration_threshold_pct = 80
         assert_eq!(cfg.spike_threshold_pct, 50.0);
         assert!(cfg.new_source_always_flag);
         assert_eq!(cfg.unparsed_min_events, 50);
+        assert_eq!(cfg.coverage_lookback_hours, 30);
         assert!(cfg.new_destination_always_flag);
         assert_eq!(cfg.concentration_threshold_pct, 80.0);
     }

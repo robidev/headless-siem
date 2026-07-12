@@ -61,9 +61,15 @@ echo "=== siemctl digest Integration Test ==="
 echo ""
 
 # ── Fixture ─────────────────────────────────────────────────────────────
-# Baseline (13:00-14:00): cron (goes silent in the window), one filterlog
-# BLOCK and one outbound ALLOW (so the window's spike/new-destination
-# checks have something real to compare against, not just zero).
+# Baseline (13:00-14:00): one filterlog BLOCK and one outbound ALLOW (so
+# the window's spike/new-destination checks, which compare against `win`'s
+# own short baseline, have something real to compare against, not just
+# zero). cron fires more than 24h before the window's end instead (see
+# below) — coverage's new_sources/gone_silent now compare against a
+# `coverage_lookback_hours` (default 24h) window ending at the digest
+# window's end, independent of `win`'s own short baseline (§7.1 digest
+# coverage fix), so "goes silent" needs cron present in the *coverage*
+# baseline (the 24h before that lookback), not `win`'s adjacent hour.
 # Window (14:00-15:00): sshd auth failures, sudo privilege escalation, a
 # systemd unit restart cycle, a pfsense config change, a filterlog BLOCK
 # spike, an inbound ALLOW, the same outbound destination as baseline (must
@@ -71,7 +77,7 @@ echo ""
 # openvpn event (a source that only exists in the window).
 FIXTURE="$TEST_DIR/fixture.log"
 cat > "$FIXTURE" <<'EOF'
-<142>1 2026-07-01T13:10:00+00:00 myhost cron 1 - - (root) CMD (/usr/bin/backup.sh)
+<142>1 2026-06-30T00:00:00+00:00 myhost cron 1 - - (root) CMD (/usr/bin/backup.sh)
 <134>1 2026-07-01T13:20:00+00:00 pfsense filterlog 1 - - 1,,,5,re1,match,block,in,4,0x0,0x0,64,5,0,DF,6,tcp,60,203.0.113.99,192.168.178.1,54322,23,0
 <134>1 2026-07-01T13:25:00+00:00 pfsense filterlog 1 - - 1,,,3,lan,match,pass,out,4,0x0,0x0,64,3,0,DF,6,tcp,60,192.168.178.12,172.66.152.176,55556,80,0
 <86>1 2026-07-01T14:05:00+00:00 myhost sshd 1234 - - Failed password for root from 203.0.113.5 port 22 ssh2
@@ -132,8 +138,10 @@ echo ""
 # ── Coverage ────────────────────────────────────────────────────────────
 echo "[1] coverage"
 assert_jq "6 sources reporting in the window" '.coverage.sources_reporting' "6"
-assert_jq "cron went silent" '.coverage.gone_silent | sort | join(",")' "cron"
+assert_jq "cron went silent (coverage_lookback_hours default, not win's own baseline)" \
+    '.coverage.gone_silent | sort | join(",")' "cron"
 assert_jq "openvpn is a new source" '.coverage.new_sources | index("openvpn") != null' "true"
+assert_jq "24h coverage lookback isn't itself cold-starting" '.coverage.coverage_cold_start' "false"
 echo ""
 
 # ── Volume ──────────────────────────────────────────────────────────────

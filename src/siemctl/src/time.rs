@@ -241,6 +241,15 @@ impl Window {
         let dur = self.duration();
         Window { start: self.start - dur, end: self.start }
     }
+
+    /// A window of exactly `dur`, ending at `self.end` — independent of
+    /// `self`'s own duration, unlike [`Window::baseline`]. Used where a
+    /// comparison needs a duration decoupled from `--window` itself (e.g.
+    /// the digest's coverage section, which wants a multi-day lookback
+    /// regardless of how short the digest's own window is).
+    pub fn lookback(&self, dur: Duration) -> Window {
+        Window { start: self.end - dur, end: self.end }
+    }
 }
 
 /// Parse a relative duration like `"10m"`, `"6h"`, `"24h"`, `"2d"`, `"45s"`.
@@ -457,6 +466,26 @@ mod digest_window_tests {
         let b = w.baseline();
         assert_eq!(b.start, ymdhms(2026, 2, 28, 18, 0, 0));
         assert_eq!(b.end, ymdhms(2026, 3, 1, 0, 0, 0));
+    }
+
+    // ── Window::lookback ─────────────────────────────────────────────────
+
+    #[test]
+    fn lookback_ends_at_self_end_with_the_given_duration() {
+        let w = Window { start: ymdhms(2026, 6, 29, 14, 0, 0), end: ymdhms(2026, 6, 29, 15, 0, 0) };
+        let lb = w.lookback(Duration::hours(24));
+        assert_eq!(lb.end, w.end);
+        assert_eq!(lb.start, ymdhms(2026, 6, 28, 15, 0, 0));
+    }
+
+    #[test]
+    fn lookback_is_independent_of_self_duration() {
+        // A 5-minute window still yields a full 24h lookback, unlike
+        // `baseline()` which would mirror the 5-minute span.
+        let w = Window { start: ymdhms(2026, 6, 29, 14, 55, 0), end: ymdhms(2026, 6, 29, 15, 0, 0) };
+        let lb = w.lookback(Duration::hours(24));
+        assert_eq!(lb.duration(), Duration::hours(24));
+        assert_ne!(lb.duration(), w.duration());
     }
 
     // ── raw_file_range / parse_raw_file_time ────────────────────────────

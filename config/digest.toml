@@ -8,6 +8,8 @@ new_source_always_flag = true # flag a source with zero baseline events as "new"
 
 [coverage]
 unparsed_min_events = 50      # only flag unparsed (_normalized: false) sources with more than this many events
+coverage_lookback_hours = 24  # new_sources/gone_silent compare this many hours back, independent of --window,
+                               # so sub-daily sources (e.g. corosync/pmxcfs) don't flap on a short digest window
 
 [network]
 new_destination_always_flag = true # include destinations not seen in the baseline window

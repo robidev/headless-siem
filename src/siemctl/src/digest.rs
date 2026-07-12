@@ -63,6 +63,12 @@ pub const DEFAULT_UNPARSED_MIN_EVENTS: u64 = 50;
 pub const DEFAULT_CONCENTRATION_THRESHOLD_PCT: f64 = 80.0;
 pub const DEFAULT_WAN_INTERFACE: &str = "re1";
 pub const DEFAULT_TOP_BLOCKED_LIMIT: usize = 20;
+/// Default lookback for the coverage section's `new_sources`/`gone_silent`
+/// check — long enough to absorb the slowest named noisy sources'
+/// reporting jitter (`corosync`/`pmxcfs`, sub-daily but not hourly) without
+/// making a genuinely-decommissioned source take unreasonably long to flag
+/// (worst case ~2x lookback). See `build_coverage`'s doc comment.
+pub const DEFAULT_COVERAGE_LOOKBACK_HOURS: u64 = 24;
 
 /// Minimum fraction of the baseline window that must actually have data on
 /// disk before it's trusted as a real comparison baseline — see
@@ -124,6 +130,7 @@ pub struct DigestConfig {
     pub spike_threshold_pct: f64,
     pub new_source_always_flag: bool,
     pub unparsed_min_events: u64,
+    pub coverage_lookback_hours: u64,
     pub concentration_threshold_pct: f64,
     pub wan_interface: String,
     pub top_blocked_limit: usize,
@@ -136,6 +143,7 @@ impl Default for DigestConfig {
             spike_threshold_pct: DEFAULT_SPIKE_THRESHOLD_PCT,
             new_source_always_flag: true,
             unparsed_min_events: DEFAULT_UNPARSED_MIN_EVENTS,
+            coverage_lookback_hours: DEFAULT_COVERAGE_LOOKBACK_HOURS,
             concentration_threshold_pct: DEFAULT_CONCENTRATION_THRESHOLD_PCT,
             wan_interface: DEFAULT_WAN_INTERFACE.to_string(),
             top_blocked_limit: DEFAULT_TOP_BLOCKED_LIMIT,
@@ -153,36 +161,19 @@ pub fn build_report(
     interval: Duration,
 ) -> Result<DigestReport> {
     let baseline = win.baseline();
+    let cold_start = cold_start_for_baseline(data_dir, &baseline);
 
-    // Cold-start: less than COLD_START_COVERAGE_FLOOR of the baseline
-    // window actually has data on disk — every source looks "new" not
-    // because it's actually new, but because the SIEM itself is only a few
-    // days old and there's no real prior period to compare against.
-    //
-    // Two simpler approaches were tried and rejected:
-    // - Comparing `baseline.start` against the earliest raw event on disk:
-    //   false-positives on almost every real baseline, since actual event
-    //   timestamps essentially never land exactly on the window's nominal
-    //   start (seen live: a baseline "starting" 10 minutes into its hour
-    //   still has 50 real minutes of coverage — not a cold start).
-    // - Comparing total baseline event *count* against the window's count:
-    //   false-positives on a genuine volume spike (window count \u{226b}
-    //   baseline count is also what a real attack/anomaly looks like, not
-    //   just "not enough history yet").
-    //
-    // The time-coverage-fraction below avoids both: it only cares how much
-    // of the baseline *window*, by wall-clock duration, falls after data
-    // collection began — immune to rate differences between the two
-    // periods, and tolerant of a baseline that starts a little before the
-    // first real event.
-    let cold_start = digest_query::earliest_raw_event_time(data_dir)
-        .map(|earliest| {
-            let baseline_seconds = (baseline.end - baseline.start).num_seconds().max(1) as f64;
-            let covered_start = earliest.max(baseline.start);
-            let covered_seconds = (baseline.end - covered_start).num_seconds().max(0) as f64;
-            covered_seconds < baseline_seconds * COLD_START_COVERAGE_FLOOR
-        })
-        .unwrap_or(false);
+    // The coverage section's new_sources/gone_silent check needs its own,
+    // much longer lookback (independent of `win`'s own duration) so a
+    // sub-daily source doesn't flap between "new"/"gone silent" every time
+    // a short digest window happens to miss it — see `build_coverage`'s
+    // doc comment. It gets its own cold-start check against its own
+    // baseline, not `cold_start` above: reusing the short-window bool here
+    // would under/over-suppress `new_sources` for the first
+    // `coverage_lookback_hours` after SIEM startup (that window's own
+    // baseline is a different — and much longer — span than `win`'s).
+    let coverage_window = win.lookback(Duration::hours(cfg.coverage_lookback_hours as i64));
+    let coverage_cold_start = cold_start_for_baseline(data_dir, &coverage_window.baseline());
 
     Ok(DigestReport {
         window: WindowInfo {
@@ -191,13 +182,51 @@ pub fn build_report(
             baseline_start: baseline.start,
             baseline_end: baseline.end,
         },
-        coverage: build_coverage(data_dir, win, cfg, cold_start)?,
+        coverage: build_coverage(data_dir, win, &coverage_window, cfg, cold_start, coverage_cold_start)?,
         volume: build_volume(data_dir, win, cfg, cold_start)?,
         network: build_network_with_interval(data_dir, win, cfg, interval)?,
         auth: build_auth(data_dir, win)?,
         alerts: build_alerts(data_dir, win, cfg)?,
         notable: build_notable(data_dir, win)?,
     })
+}
+
+/// Whether `baseline` predates real data collection enough that it can't be
+/// trusted as a comparison point — every source in the compared window
+/// would otherwise look "new"/"gone silent" not because of a real change,
+/// but because the SIEM itself hasn't been collecting long enough to have a
+/// genuine prior period to compare against.
+///
+/// Two simpler approaches were tried and rejected:
+/// - Comparing `baseline.start` against the earliest raw event on disk:
+///   false-positives on almost every real baseline, since actual event
+///   timestamps essentially never land exactly on the window's nominal
+///   start (seen live: a baseline "starting" 10 minutes into its hour
+///   still has 50 real minutes of coverage — not a cold start).
+/// - Comparing total baseline event *count* against the window's count:
+///   false-positives on a genuine volume spike (window count \u{226b}
+///   baseline count is also what a real attack/anomaly looks like, not
+///   just "not enough history yet").
+///
+/// The time-coverage-fraction below avoids both: it only cares how much of
+/// `baseline`, by wall-clock duration, falls after data collection began —
+/// immune to rate differences between the two periods, and tolerant of a
+/// baseline that starts a little before the first real event.
+///
+/// Shared by `build_report`'s short-window check (`win.baseline()`, feeds
+/// `build_volume`'s "new"-flag suppression) and its long-lookback check
+/// (`coverage_window.baseline()`, feeds `build_coverage`'s `new_sources`
+/// suppression) — each call is against that check's own baseline, never a
+/// bool shared across the two windows.
+fn cold_start_for_baseline(data_dir: &Path, baseline: &Window) -> bool {
+    digest_query::earliest_raw_event_time(data_dir)
+        .map(|earliest| {
+            let baseline_seconds = (baseline.end - baseline.start).num_seconds().max(1) as f64;
+            let covered_start = earliest.max(baseline.start);
+            let covered_seconds = (baseline.end - covered_start).num_seconds().max(0) as f64;
+            covered_seconds < baseline_seconds * COLD_START_COVERAGE_FLOOR
+        })
+        .unwrap_or(false)
 }
 
 // ── 1. Coverage / health ─────────────────────────────────────────────────
@@ -229,33 +258,73 @@ pub struct CoverageSection {
     /// only compares the newest timestamp on each side) cannot see. See
     /// `digest_query::completeness_in_range`'s doc comment.
     pub incomplete_buckets: Vec<IncompleteBucket>,
-    /// True when the baseline window starts before the earliest raw event
-    /// on disk — there's no real prior period to compare against, so
-    /// `new_sources` is suppressed (left empty) rather than flooding with
-    /// every currently-reporting source. See `build_report`'s doc comment.
+    /// True when `win`'s own short baseline (`win.baseline()`) starts
+    /// before the earliest raw event on disk — there's no real prior
+    /// period to compare against yet. Gates `build_volume`'s "new" flag
+    /// and `digest_render.rs`'s baseline-count-is-zero explanation; see
+    /// `build_report`'s doc comment. Distinct from `coverage_cold_start`
+    /// below, which gates this section's own `new_sources`/`gone_silent`.
     pub cold_start: bool,
+    /// True when the coverage lookback window's own baseline
+    /// (`coverage_window.baseline()` — see [`crate::time::Window::lookback`]
+    /// and `config/digest.toml`'s `coverage_lookback_hours`) starts before
+    /// the earliest raw event on disk. Gates `new_sources` (left empty
+    /// rather than flooding with every currently-reporting source) —
+    /// computed against the long lookback window, not `win`'s own short
+    /// baseline, so the first `coverage_lookback_hours` after SIEM startup
+    /// doesn't under/over-suppress using the wrong window's coverage.
+    pub coverage_cold_start: bool,
 }
 
+/// `coverage_window` (`win.lookback(coverage_lookback_hours)` — see
+/// [`crate::time::Window::lookback`]) drives `new_sources`/`gone_silent`,
+/// compared against `coverage_window.baseline()`, **not** `win`/
+/// `win.baseline()`. A sub-daily source (e.g. `corosync`/`pmxcfs`) can
+/// easily miss `win` itself (a short `--window`) without having actually
+/// gone away — comparing over a multi-hour lookback instead absorbs that
+/// reporting jitter. `sources_reporting` and everything else in this
+/// section still describe `win` itself, unchanged.
 pub fn build_coverage(
     data_dir: &Path,
     win: &Window,
+    coverage_window: &Window,
     cfg: &DigestConfig,
     cold_start: bool,
+    coverage_cold_start: bool,
 ) -> Result<CoverageSection> {
     let window_counts = digest_query::group_count_in_range(data_dir, win, &["_source_type"], None, &[])?;
-    let baseline_counts =
-        digest_query::group_count_in_range(data_dir, &win.baseline(), &["_source_type"], None, &[])?;
-
     let window_sources: BTreeSet<String> =
         window_counts.keys().filter_map(|k| k.first()).filter(|s| !s.is_empty()).cloned().collect();
-    let baseline_sources: BTreeSet<String> =
-        baseline_counts.keys().filter_map(|k| k.first()).filter(|s| !s.is_empty()).cloned().collect();
 
-    let gone_silent: Vec<String> = baseline_sources.difference(&window_sources).cloned().collect();
-    let new_sources: Vec<String> = if cold_start {
+    let coverage_window_counts =
+        digest_query::group_count_in_range(data_dir, coverage_window, &["_source_type"], None, &[])?;
+    let coverage_baseline_counts = digest_query::group_count_in_range(
+        data_dir,
+        &coverage_window.baseline(),
+        &["_source_type"],
+        None,
+        &[],
+    )?;
+
+    let coverage_window_sources: BTreeSet<String> = coverage_window_counts
+        .keys()
+        .filter_map(|k| k.first())
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect();
+    let coverage_baseline_sources: BTreeSet<String> = coverage_baseline_counts
+        .keys()
+        .filter_map(|k| k.first())
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect();
+
+    let gone_silent: Vec<String> =
+        coverage_baseline_sources.difference(&coverage_window_sources).cloned().collect();
+    let new_sources: Vec<String> = if coverage_cold_start {
         Vec::new()
     } else {
-        window_sources.difference(&baseline_sources).cloned().collect()
+        coverage_window_sources.difference(&coverage_baseline_sources).cloned().collect()
     };
 
     let unparsed_high_volume = unparsed_high_volume_sources(data_dir, win, cfg.unparsed_min_events);
@@ -286,6 +355,7 @@ pub fn build_coverage(
         index_lag_seconds,
         incomplete_buckets,
         cold_start,
+        coverage_cold_start,
     })
 }
 
@@ -1084,8 +1154,15 @@ mod tests {
 
         // window_with_matching_baseline() itself has no data, so every
         // source that reported in its baseline (08:00-09:00) is gone silent.
-        let cov = build_coverage(&tmp.path, &window_with_matching_baseline(), &DigestConfig::default(), false)
-            .unwrap();
+        let cov = build_coverage(
+            &tmp.path,
+            &window_with_matching_baseline(),
+            &window_with_matching_baseline(),
+            &DigestConfig::default(),
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(cov.sources_reporting, 0);
         assert!(cov.gone_silent.contains(&"suricata".to_string()));
         assert!(cov.gone_silent.contains(&"sshd".to_string()));
@@ -1100,7 +1177,7 @@ mod tests {
 
         // window()'s derived baseline (13:00-14:00) is empty, so every
         // source present in the window bucket counts as "new".
-        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), false).unwrap();
+        let cov = build_coverage(&tmp.path, &window(), &window(), &DigestConfig::default(), false, false).unwrap();
         assert!(cov.new_sources.contains(&"openvpn".to_string()));
         assert!(cov.new_sources.contains(&"sshd".to_string()));
         assert_eq!(cov.sources_reporting, cov.new_sources.len());
@@ -1130,7 +1207,7 @@ mod tests {
         )
         .unwrap();
 
-        let cov = build_coverage(&tmp.path, &win, &DigestConfig::default(), false).unwrap();
+        let cov = build_coverage(&tmp.path, &win, &win, &DigestConfig::default(), false, false).unwrap();
         assert_eq!(cov.unparsed_high_volume.len(), 1);
         assert_eq!(cov.unparsed_high_volume[0].app_name, "gnome-shell");
         assert_eq!(cov.unparsed_high_volume[0].count, 51);
@@ -1146,7 +1223,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sshd.jsonl"), "{}\n").unwrap();
 
-        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), false).unwrap();
+        let cov = build_coverage(&tmp.path, &window(), &window(), &DigestConfig::default(), false, false).unwrap();
         assert_eq!(cov.latest_raw, Some(ymdhms(2026, 6, 29, 14, 27, 0)));
         assert_eq!(cov.latest_indexed, Some(ymdhms(2026, 6, 29, 14, 17, 0)));
         assert_eq!(cov.index_lag_seconds, Some(600));
@@ -1167,7 +1244,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sshd.jsonl"), "{}\n{}\n{}\n").unwrap();
 
-        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), false).unwrap();
+        let cov = build_coverage(&tmp.path, &window(), &window(), &DigestConfig::default(), false, false).unwrap();
         assert_eq!(cov.incomplete_buckets.len(), 1);
         assert_eq!(cov.incomplete_buckets[0].bucket, "2026-06-29-14");
         assert_eq!(cov.incomplete_buckets[0].raw_count, 3);
@@ -1180,7 +1257,7 @@ mod tests {
         seed_fixture(&tmp.path);
         // seed_fixture only writes index rows, no raw files — completeness
         // has nothing to compare against, so it must not false-positive.
-        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), false).unwrap();
+        let cov = build_coverage(&tmp.path, &window(), &window(), &DigestConfig::default(), false, false).unwrap();
         assert!(cov.incomplete_buckets.is_empty());
     }
 
@@ -1188,18 +1265,99 @@ mod tests {
     fn coverage_cold_start_suppresses_new_sources_but_reports_it() {
         let tmp = TempDir::new();
         seed_fixture(&tmp.path);
-        // Passing cold_start=true directly (the flag build_report would
-        // compute when the baseline predates the earliest raw event) — every
-        // source in the window would otherwise show up in new_sources per
+        // Passing coverage_cold_start=true directly (the flag build_report
+        // would compute when the coverage lookback window's own baseline
+        // predates the earliest raw event) — every source in the window
+        // would otherwise show up in new_sources per
         // coverage_new_source_detected_against_adjacent_baseline.
-        let cov = build_coverage(&tmp.path, &window(), &DigestConfig::default(), true).unwrap();
-        assert!(cov.cold_start);
+        let cov = build_coverage(&tmp.path, &window(), &window(), &DigestConfig::default(), false, true).unwrap();
+        assert!(cov.coverage_cold_start);
         assert!(cov.new_sources.is_empty(), "cold start must suppress new_sources, not flood it");
+    }
+
+    #[test]
+    fn coverage_long_lookback_absorbs_a_sub_daily_source_missing_the_short_window() {
+        // The live bug this feature exists for: a source that only logs
+        // once a day (corosync/pmxcfs) fires outside `win` itself but well
+        // within a 24h coverage lookback ending at `win.end` — it must show
+        // up in neither `gone_silent` nor `new_sources`, even though `win`
+        // alone (14:00-15:00) never sees it and `sources_reporting` (which
+        // still describes `win` alone) stays 0.
+        let tmp = TempDir::new();
+        let idx = tmp.path.join("index");
+        std::fs::create_dir_all(&idx).unwrap();
+
+        let today = idx.join("2026-06-29-03.db");
+        let conn = Connection::open(&today).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        conn.execute(
+            "INSERT INTO events VALUES ('raw/2026/06/29/03/00/00/corosync.jsonl', 'corosync')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        // Also present the day before, so it's not "new" in the coverage
+        // window either — a genuinely steady sub-daily source, not a
+        // one-off.
+        let yesterday = idx.join("2026-06-28-03.db");
+        let conn = Connection::open(&yesterday).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        conn.execute(
+            "INSERT INTO events VALUES ('raw/2026/06/28/03/00/00/corosync.jsonl', 'corosync')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let win = window();
+        let coverage_window = win.lookback(Duration::hours(24));
+        let cov =
+            build_coverage(&tmp.path, &win, &coverage_window, &DigestConfig::default(), false, false)
+                .unwrap();
+
+        assert_eq!(cov.sources_reporting, 0, "win alone never sees corosync's 03:00 event");
+        assert!(
+            !cov.gone_silent.contains(&"corosync".to_string()),
+            "a sub-daily source within the lookback must not flap as gone-silent"
+        );
+        assert!(
+            !cov.new_sources.contains(&"corosync".to_string()),
+            "a source seen in the coverage baseline too must not be flagged new"
+        );
+    }
+
+    #[test]
+    fn build_report_coverage_cold_start_is_independent_of_the_short_window_cold_start() {
+        let tmp = TempDir::new();
+        // Earliest data at 12:00 comfortably covers window()'s short
+        // baseline (13:00-14:00) — the short `cold_start` is false. But the
+        // coverage lookback's own baseline (the 24h immediately before the
+        // 24h coverage window, i.e. 06-27T15:00-06-28T15:00) is entirely
+        // before this data — `coverage_cold_start` must independently
+        // still be true. Proves the two checks use their own baseline, not
+        // one bool shared across windows (see `build_report`'s doc
+        // comment on `cold_start_for_baseline`).
+        std::fs::create_dir_all(tmp.path.join("raw/2026/06/29/12/00/00")).unwrap();
+        std::fs::write(
+            tmp.path.join("raw/2026/06/29/12/00/00/sshd.jsonl"),
+            "{\"timestamp\":\"2026-06-29T12:00:00Z\",\"_source_type\":\"sshd\"}\n",
+        )
+        .unwrap();
+
+        let report =
+            build_report(&tmp.path, &window(), &DigestConfig::default(), Duration::minutes(10)).unwrap();
+        assert!(!report.coverage.cold_start, "short window baseline is well covered");
+        assert!(report.coverage.coverage_cold_start, "24h lookback baseline predates any real data");
     }
 
     #[test]
     fn build_report_detects_cold_start_from_earliest_raw_event() {
         let tmp = TempDir::new();
+        // Exercises the short-window check (`report.coverage.cold_start`,
+        // against `win.baseline()`) — see
+        // `build_report_coverage_cold_start_is_independent_of_the_short_window_cold_start`
+        // below for the long-lookback equivalent (`coverage_cold_start`).
+        //
         // Earliest data on disk starts at 14:00 on the window's own day —
         // window()'s baseline (13:00-14:00) predates that, so this is a
         // genuine cold start: there's no real prior period on disk yet.

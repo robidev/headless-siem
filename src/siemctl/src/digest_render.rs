@@ -111,7 +111,7 @@ fn render_coverage(out: &mut String, report: &DigestReport) {
     out.push_str(&format!("=== COVERAGE ({} \u{2013} {}) ===\n\n", ws, we));
     out.push_str(&format!("Sources reporting:     {}\n", cov.sources_reporting));
     out.push_str(&format!("Sources gone silent:   {}\n", list_or_none(&cov.gone_silent)));
-    if cov.cold_start {
+    if cov.coverage_cold_start {
         out.push_str(
             "New sources:           \u{2014} (baseline not yet established — cold start, see below)\n",
         );
@@ -125,12 +125,12 @@ fn render_coverage(out: &mut String, report: &DigestReport) {
     }
     out.push('\n');
 
-    if cov.cold_start {
+    if cov.coverage_cold_start {
         out.push_str(
-            "COLD START: the baseline period predates the earliest data on disk — there is \
-             no real prior period to compare against yet, so \"new source\"/volume-delta flags \
-             are suppressed rather than firing for every source. This resolves itself once \
-             enough history accumulates (baseline window fully inside retained data).\n\n",
+            "COLD START: the coverage lookback window's baseline predates the earliest data \
+             on disk — there is no real prior period to compare against yet, so \"new source\" \
+             is suppressed rather than firing for every source. This resolves itself once \
+             enough history accumulates (the lookback baseline fully inside retained data).\n\n",
         );
     }
 
