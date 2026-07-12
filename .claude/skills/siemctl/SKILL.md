@@ -73,6 +73,40 @@ succeeds** — no line is ever dropped (`_normalized: false`, `_raw` only). Ties
 really occur: each detector either self-validates and returns `Some`, or the chain
 falls through to the next by construction.
 
+## Common Queries (Real-World SOC Use)
+
+**Check for external access to a service since 7 AM:**
+```bash
+siemctl search --query "src_ip != 10.10.50.0 AND src_ip != 10.10.60.0 AND src_ip != 10.10.10.0 AND (dst_port == 8006 OR dst_port == 443)" \
+  --after 2026-07-12T07:00:00 --format json
+```
+(Adjust CIDR ranges and ports for your infrastructure.)
+
+**Find all alerts/errors this morning:**
+```bash
+siemctl search --query "severity == 'error' OR severity == 'warning'" --after 2026-07-12T07:00:00
+```
+
+**List traffic by source IP (attack surface overview):**
+```bash
+siemctl search --query "SELECT src_ip, count GROUP BY src_ip LIMIT 50" --after 2026-07-12T07:00:00
+```
+
+**Search for events from a specific source type:**
+```bash
+siemctl search --query "_source_type == 'sshd' AND event_type == 'ssh_auth_failure'" --after 2026-07-12T00:00:00
+```
+
+**Find all events matching a substring (index bypass):**
+```bash
+siemctl search --raw 'Failed password' --after 2026-07-12T07:00:00
+```
+
+**Count events by severity:**
+```bash
+siemctl search --query "severity, count GROUP BY severity"
+```
+
 ## Usage Examples
 
 All verified by running the binaries in this repo (`target/debug/*`) against
@@ -145,6 +179,32 @@ target/debug/siemctl validate --config config/sources.toml --rules config/rules/
   ...
 Validation complete: 10 rule file(s), 0 error(s), 0 warning(s).
 ```
+
+## Indexed Fields by Source
+
+Only these fields can be used in `--query` predicates (`WHERE`, `GROUP BY`, function arguments).
+Always-indexed fields (available for all sources) are: `timestamp`, `hostname`, `app_name`, `source_addr`, `_source_type`, `severity`.
+
+| Source | Indexed Fields |
+|---|---|
+| **filterlog** (pfSense firewall) | `src_ip`, `dst_ip`, `dst_port`, `action`, `protocol`, `interface`, `direction`, `event_type` |
+| **sshd** | `src_ip`, `src_port`, `dst_ip`, `username`, `event_type`, `auth_method`, `auth_action` |
+| **sudo** | `username`, `event_type`, `target_user`, `command`, `tty` |
+| **haproxy** | `src_ip`, `src_port`, `frontend`, `backend`, `event_type`, `http_method`, `http_uri` |
+| **systemd** | `event_type`, `unit` |
+| **systemd-logind** | `username`, `session_id`, `session_class`, `session_type`, `event_type` |
+| **dnsmasq** | `src_ip`, `query`, `event_type` |
+| **iptables** | `src_ip`, `dst_ip`, `dst_port`, `event_type` |
+| **router** | `src_ip`, `dst_ip`, `dst_port`, `event_type` |
+| **openvpn** | `src_ip`, `src_port`, `event_type` |
+| **unifi** | `src_ip`, `dst_ip`, `event_type` |
+| **suricata** (IDS) | `gid`, `sid`, `rev`, `alert_msg`, `classification`, `priority`, `protocol`, `src_ip`, `src_port`, `dst_ip`, `dst_port`, `event_type` |
+| **cron** | `cron_user`, `command`, `event_type` |
+| **unix_chkpwd** | `username`, `event_type` |
+| **php-fpm** | `admin_user`, `src_ip`, `event_type`, `pfsense_page` |
+| **default** (any unlisted source) | `src_ip`, `dst_ip`, `event_type` |
+
+**Tip:** To search unindexed fields (e.g., `message`, `_raw`), use `raw_contains('substring')` or add the field to a `SELECT` projection (it will render as `null` if not indexed, but won't error).
 
 ## Gotchas / Edge Cases
 
