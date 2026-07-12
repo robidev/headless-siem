@@ -30,6 +30,7 @@ pub fn parse_object(raw: &[u8], source_addr: &str) -> Option<Event> {
         msg_id: None,
         message,
         fields,
+        force_severity: false,
         raw: raw.to_vec(),
     })
 }
@@ -74,6 +75,7 @@ pub fn parse_array(raw: &[u8], source_addr: &str) -> Option<Event> {
         msg_id: None,
         message,
         fields,
+        force_severity: false,
         raw: raw.to_vec(),
     })
 }

@@ -20,6 +20,7 @@ pub struct ExtractRule {
     from: String,
     patterns: Vec<Regex>,
     set: Vec<(String, String)>,
+    force_severity: bool,
 }
 
 /// Compile config extract rules. Bad patterns are reported and dropped.
@@ -40,6 +41,7 @@ pub fn build(cfgs: &[ExtractRuleConfig]) -> Vec<ExtractRule> {
                 from: c.from.clone().unwrap_or_else(|| "message".to_string()),
                 patterns,
                 set: c.set.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                force_severity: c.force_severity,
             }
         })
         .collect()
@@ -75,6 +77,9 @@ pub fn apply(rules: &[ExtractRule], event: &mut Event, source: &str) {
         }
         for (k, v) in &rule.set {
             event.fields.insert(k.clone(), v.clone());
+        }
+        if rule.force_severity {
+            event.force_severity = true;
         }
     }
 }
@@ -118,6 +123,7 @@ mod tests {
             msg_id: None,
             message: "Failed password for root from 10.0.0.5 port 22 ssh2".into(),
             fields: HashMap::new(),
+            force_severity: false,
             raw: b"...".to_vec(),
         }
     }
@@ -128,6 +134,7 @@ mod tests {
             from: Some(from.to_string()),
             patterns: patterns.iter().map(|s| s.to_string()).collect(),
             set: set.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+            force_severity: false,
         }
     }
 

@@ -155,6 +155,11 @@ pub struct Event {
     // ── structured fields (CEF extensions, JSON keys, logfmt pairs, …) ──
     pub fields: HashMap<String, String>,
 
+    /// Set by a matching extract rule's `force_severity = true` (see
+    /// `extract::apply`) — when true, `flatten()` lets `fields["severity"]`
+    /// win instead of the envelope-derived `severity` clobbering it.
+    pub force_severity: bool,
+
     /// The unmodified input bytes, for debugging / passthrough.
     pub raw: Vec<u8>,
 }
@@ -254,7 +259,9 @@ impl Event {
             m.insert("msg_id".into(), FlatVal::Str(v.clone()));
         }
         if let Some(s) = &self.severity {
-            m.insert("severity".into(), FlatVal::Str(s.as_str().to_string()));
+            if !self.force_severity {
+                m.insert("severity".into(), FlatVal::Str(s.as_str().to_string()));
+            }
         }
         if let Some(f) = &self.facility {
             m.insert("facility".into(), FlatVal::Str(f.as_str().to_string()));
@@ -375,6 +382,7 @@ mod tests {
             msg_id: None,
             message: "Failed password".into(),
             fields: HashMap::new(),
+            force_severity: false,
             raw: b"<13>...".to_vec(),
         }
     }
@@ -482,6 +490,16 @@ mod tests {
         assert_eq!(m.get("dst_ip"), Some(&FlatVal::Str("2.2.2.2".into())));
         // envelope severity (error) overrides a stray "severity" field
         assert_eq!(m.get("severity"), Some(&FlatVal::Str("error".into())));
+    }
+
+    #[test]
+    fn flatten_lets_rule_severity_win_when_force_severity_is_set() {
+        let mut ev = base_event();
+        ev.fields.insert("severity".into(), "notice".into());
+        ev.force_severity = true;
+        let m = ev.flatten("sshd", "2026-06-27T09:00:00Z");
+        // force_severity: rule's severity wins over envelope severity (error)
+        assert_eq!(m.get("severity"), Some(&FlatVal::Str("notice".into())));
     }
 
     #[test]

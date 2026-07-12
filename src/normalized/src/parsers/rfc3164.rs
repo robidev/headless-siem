@@ -62,6 +62,7 @@ pub fn parse(raw: &[u8], source_addr: &str) -> Option<Event> {
         msg_id: None,
         message,
         fields: HashMap::new(),
+        force_severity: false,
         raw: raw.to_vec(),
     })
 }

@@ -85,6 +85,9 @@ pub struct ExtractRuleConfig {
     pub patterns: Vec<String>,
     /// Static fields to set when the rule matches.
     pub set: HashMap<String, String>,
+    /// Opt-in: let this rule's `set.severity` win over the envelope-derived
+    /// severity at flatten time, instead of being silently clobbered.
+    pub force_severity: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -243,6 +246,7 @@ impl Config {
                             "from" => rule.from = Some(v.to_owned()),
                             "pattern" => rule.patterns.push(v.to_owned()),
                             "set" => parse_inline_map(v, &mut rule.set),
+                            "force_severity" => rule.force_severity = v == "true",
                             _ => rule.conditions.push((k.to_owned(), v.to_owned())),
                         }
                     }
