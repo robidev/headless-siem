@@ -70,8 +70,14 @@ Index coverage:        current (latest raw: 20:07, latest bucket: 20:00)
 
 **Fields:**
 - Sources reporting vs. sources that reported in the baseline window
-- Sources that appeared in baseline but not this window → "gone silent"
-- Sources appearing for the first time ever → "new sources"
+- "Gone silent" / "new sources": since 2026-07-12 these two are diffed over a
+  **separate long lookback window** (`coverage_lookback_hours`, default 24h,
+  ending at the digest window's end) against that lookback's own preceding
+  baseline — not against the window's short adjacent baseline — so a
+  sub-daily source (corosync, pmxcfs) doesn't flap between the two lists on
+  a short `--window`. The lookback has its own independent cold-start gate
+  (`coverage_cold_start` in JSON, alongside the short-window `cold_start`).
+  Everything else in this section still describes the window itself.
 - App names with high event volume and elevated `_normalized: false` rate —
   these represent parser gaps
 - Index lag: difference between the newest raw JSONL timestamp and the newest
@@ -311,6 +317,7 @@ new_source_always_flag = true
 
 [coverage]
 unparsed_min_events = 50      # only flag unparsed sources with >50 events
+coverage_lookback_hours = 24  # gone_silent/new_sources lookback, independent of --window (added 2026-07-12)
 
 [network]
 new_destination_always_flag = true
