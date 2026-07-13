@@ -1,5 +1,7 @@
 # Headless SIEM
 
+![Alt text](headless-siem.png?raw=true "Moody cartoon picture about headless-siem")
+
 A minimal, Unix-philosophy SIEM for home-lab environments. Filesystem is the database. Every component is a standalone binary that reads stdin and writes stdout. Nothing is opaque.
 
 ## Architecture
