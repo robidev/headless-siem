@@ -5,6 +5,7 @@ mod parser;
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +48,23 @@ const RECENT_FILE_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 /// between two sweeps, and longer than any plausible reactive-watch
 /// catch-up delay.
 const RECENT_FILE_SWEEP_LOOKBACK: Duration = Duration::from_secs(900);
+
+/// How often the main loop verifies its top-level `raw_dir` watch is still
+/// valid, by comparing `(dev, ino)` against what was recorded when the watch
+/// was last (re)established.
+///
+/// inotify watches are inode-based, not path-based: deleting `raw_dir` (e.g.
+/// `siemctl retention --days 0`'s full wipe) invalidates every watch under
+/// it even though a new, empty directory is immediately recreated at the
+/// same path. The reactive CREATE handler below only ever catches a
+/// directory appearing *under* a directory this process is still watching —
+/// once the top-level `raw_dir` itself is gone, nothing is left watching for
+/// its return. At the event volume a full wipe produces, the fixed-size
+/// inotify queue also overflows long before an IGNORED event for every
+/// removed entry would arrive, so — unlike `RECENT_FILE_SWEEP_INTERVAL`,
+/// which backstops a reactive path that mostly already works — this
+/// periodic check is the only fix; there is no event left to react to.
+const WATCH_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a bucket connection can go without a write before eviction
 /// reclaims its WAL. An hour bucket goes quiet forever once its hour
@@ -232,6 +250,17 @@ fn collect_hour_dirs(raw_dir: &Path) -> Vec<(String, PathBuf)> {
     }
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
+}
+
+/// Return `(dev, ino)` for `path`, or `None` if it doesn't exist.
+///
+/// Used to detect a directory being removed and recreated at the same path —
+/// inotify watches follow the inode, not the path, so this is the only way
+/// to notice the swap from outside the event stream. See
+/// [`WATCH_HEALTH_CHECK_INTERVAL`].
+fn dir_identity(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
 }
 
 /// Find the project root by walking up from the current directory
@@ -515,6 +544,10 @@ fn main() {
         }
     }
 
+    // Recorded so the periodic health check (see WATCH_HEALTH_CHECK_INTERVAL)
+    // can notice raw_dir being deleted and recreated out from under us.
+    let mut raw_dir_identity = dir_identity(&raw_dir);
+
     // ── Initial scan ──────────────────────────────────────────────────
     eprintln!("[indexd] scanning existing files in {}", raw_dir.display());
     let mut progress = ScanProgress::new();
@@ -549,6 +582,7 @@ fn main() {
     let inotify_fd = inotify.as_raw_fd();
     let mut last_evict_sweep = Instant::now();
     let mut last_recent_sweep = Instant::now();
+    let mut last_watch_health_check = Instant::now();
 
     // ── Main event loop ──────────────────────────────────────────────
     while !shutdown.load(Ordering::Relaxed) {
@@ -604,6 +638,40 @@ fn main() {
                     }
                     last_recent_sweep = Instant::now();
                 }
+
+                // Watch-health check — see WATCH_HEALTH_CHECK_INTERVAL's doc
+                // comment for why a periodic stat-based check, not a reactive
+                // one, is what actually fixes raw_dir being deleted and
+                // recreated out from under our watches.
+                if last_watch_health_check.elapsed() >= WATCH_HEALTH_CHECK_INTERVAL {
+                    let current_identity = dir_identity(&raw_dir);
+                    if current_identity != raw_dir_identity {
+                        eprintln!(
+                            "[indexd] raw dir identity changed (was {:?}, now {:?}) — \
+                             likely removed and recreated (e.g. by retention); \
+                             re-establishing watches",
+                            raw_dir_identity, current_identity
+                        );
+                        watch_paths.clear();
+                        if raw_dir.exists() {
+                            add_recursive_watches(&mut inotify, &raw_dir, watch_mask, &mut watch_paths);
+                            let mut progress = ScanProgress::new();
+                            scan_existing(&index_db, &raw_dir, &data_dir, &shutdown, &mut progress);
+                            progress.finish();
+                        } else if data_dir.exists() {
+                            match inotify.watches().add(&data_dir, WatchMask::CREATE) {
+                                Ok(wd) => { watch_paths.insert(wd, data_dir.clone()); }
+                                Err(e) => eprintln!(
+                                    "[indexd] failed to watch {}: {}",
+                                    data_dir.display(),
+                                    e
+                                ),
+                            }
+                        }
+                        raw_dir_identity = current_identity;
+                    }
+                    last_watch_health_check = Instant::now();
+                }
                 continue;
             }
             Err(e) => {
@@ -629,6 +697,9 @@ fn main() {
                         eprintln!("[indexd] watching new directory: {}", new_dir.display());
                         let mut progress = ScanProgress::new();
                         scan_existing(&index_db, &new_dir, &data_dir, &shutdown, &mut progress);
+                        if new_dir == raw_dir {
+                            raw_dir_identity = dir_identity(&raw_dir);
+                        }
                     }
                 }
                 continue;
@@ -1344,5 +1415,42 @@ mod tests {
         unsafe {
             libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0);
         }
+    }
+
+    // ── dir_identity ─────────────────────────────────────────────────────
+
+    #[test]
+    fn dir_identity_missing_dir_is_none() {
+        let tmp = TempDir::new();
+        assert_eq!(dir_identity(&tmp.path.join("nonexistent")), None);
+    }
+
+    #[test]
+    fn dir_identity_stable_across_repeated_stat() {
+        let tmp = TempDir::new();
+        let dir = tmp.path.join("raw");
+        fs::create_dir(&dir).unwrap();
+        assert_eq!(dir_identity(&dir), dir_identity(&dir));
+    }
+
+    #[test]
+    fn dir_identity_changes_after_remove_and_recreate() {
+        let tmp = TempDir::new();
+        let dir = tmp.path.join("raw");
+        fs::create_dir(&dir).unwrap();
+        let before = dir_identity(&dir);
+        assert!(before.is_some());
+
+        fs::remove_dir(&dir).unwrap();
+        assert_eq!(dir_identity(&dir), None, "watch target gone: no identity");
+
+        fs::create_dir(&dir).unwrap();
+        let after = dir_identity(&dir);
+        assert!(after.is_some());
+        assert_ne!(
+            before, after,
+            "a directory recreated at the same path must report a different identity \
+             (new inode) so the watch-health check knows to rebuild its watches"
+        );
     }
 }
