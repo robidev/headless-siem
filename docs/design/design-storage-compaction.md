@@ -153,7 +153,7 @@ hour precision. Every event still carries its own `timestamp` field, and the
 compaction age threshold (Batch 3, default 7 days) is far beyond the digest's
 normal windows — sub-hour sparklines over compacted history are the only
 thing that coarsens, and only when someone runs a digest over week-old data.
-Document it in `user-guide.md` rather than engineering around it.
+Document it in `../user-guide.md` rather than engineering around it.
 
 **Tests:** every updated reader gets a fixture pair (hot per-second layout /
 compacted layout / mixed with a late-event residue bucket) asserting

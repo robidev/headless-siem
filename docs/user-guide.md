@@ -470,7 +470,7 @@ network trends, auth activity, alerts, and notable low-volume events — each
 compared against the same duration immediately preceding the window. It's
 the primary input for LLM-assisted triage (`--format json`) as well as a
 human shift-briefing summary (`--format text`, the default). See
-[design-digest-command.md](design-digest-command.md) for the full spec and
+[design-digest-command.md](design/design-digest-command.md) for the full spec and
 `digest.toml` above for tuning its anomaly thresholds.
 
 ```bash
@@ -556,7 +556,7 @@ push side: an inotify watcher on `data/alerts/` (independent of any
 LLM/agent loop polling the SIEM) that calls a notify script for every
 high/critical `ruled` alert and every correlated alert (correlated alerts
 carry no `level`, so there's nothing to threshold — any correlation is
-forwarded). See `docs/roadmap-soc-improvements.md` item 3 for the full
+forwarded). See `docs/design/roadmap-soc-improvements.md` item 3 for the full
 design and `config/systemd/headless-siem-alert-watch.service` to run it
 as a service. Quick manual run:
 

@@ -14,7 +14,7 @@ Ordered by operational impact.
 > "whole record when no SELECT" convention rather than invent a second
 > one) — so there's no special-cased `SELECT _raw`, since `_raw` already
 > resolves normally to the embedded event's own `_raw` field. See
-> [user-guide.md](user-guide.md#alerts) for usage.
+> [user-guide.md](../user-guide.md#alerts) for usage.
 
 **The problem:** Alerts from `ruled` land in `data/alerts/YYYY/MM/DD/HH/alerts.jsonl`
 and correlated alerts in `data/alerts/correlated/YYYY/MM/DD/HH/correlated.jsonl`. There is
@@ -268,9 +268,9 @@ record of what the SOC checks and why.
 ## Implementation Plan (items 1, 2, 4 — the LLM-analyst prerequisites)
 
 Scoped 2026-07-02 against the real code, for the three items that
-`docs/design-llm-soc-analyst.md` names as blocking (see that doc's
+`design-llm-soc-analyst.md` names as blocking (see that doc's
 "Prerequisites" section; the digest, item 3 there, is planned separately in
-`docs/design-digest-command.md`). Items 3/5/6/7 are not scoped here — they
+`design-digest-command.md`). Items 3/5/6/7 are not scoped here — they
 aren't on the analyst's critical path.
 
 ### Ground truth that shaped this plan

@@ -114,7 +114,7 @@ cat tests/fixtures/sshd.log | ./target/release/normalized --stdin --dry-run --so
 ### In Progress / Known Gaps
 
 - **Rule coverage** — 10 Sigma rules and 4 correlation rules shipped; still narrow relative to the Sigma ecosystem, and there's no automated FP-tuning loop yet beyond manually authored `--suppress` rules and `alerts ack`.
-- **No built-in triage automation** — `digest`, `alerts` (query + ack), and `ruled --suppress` give a consumer everything it needs to poll this SIEM on a schedule and triage/acknowledge findings (see `docs/design-llm-soc-analyst.md` for the design rationale behind that split), but actually running such a loop — cron scheduling, escalation policy, ticketing — is outside this project's scope. `siemctl` and the pipeline stop at the query/ack interface.
+- **No built-in triage automation** — `digest`, `alerts` (query + ack), and `ruled --suppress` give a consumer everything it needs to poll this SIEM on a schedule and triage/acknowledge findings (see `docs/design/design-llm-soc-analyst.md` for the design rationale behind that split), but actually running such a loop — cron scheduling, escalation policy, ticketing — is outside this project's scope. `siemctl` and the pipeline stop at the query/ack interface.
 - **Alert state** — `siemctl alerts ack <rule_id>` is a single watermark per rule (hide up to now); there's no per-alert investigation state (closed/false-positive/etc.) beyond that.
 - **Processing-time windows** — `ruled` dedup and `correlated` windows key off wall-clock
   processing time, not event time. This is correct for a live tail. For batch/historical replay,

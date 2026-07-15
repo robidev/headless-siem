@@ -178,10 +178,10 @@ from the others.
 
 | # | Prerequisite | Detail | Batches | Model / effort | Status |
 |---|---|---|---|---|---|
-| 1 | Digest (`siemctl digest`) | `docs/design-digest-command.md` | 4 | Sonnet 5 — high, high, medium, medium | ✅ Done |
-| 2 | `siemctl alerts` query interface | `docs/roadmap-soc-improvements.md` Batches 1–2 | 2 | Sonnet 5 — high, medium | ✅ Done |
-| 3 | Alert state management | `docs/roadmap-soc-improvements.md` Batch 3 | 1 | Sonnet 5 — medium | ✅ Done |
-| 4 | Alert suppression rules | `docs/roadmap-soc-improvements.md` Batch 4 | 1 | Sonnet 5 — high | ✅ Done |
+| 1 | Digest (`siemctl digest`) | `design-digest-command.md` | 4 | Sonnet 5 — high, high, medium, medium | ✅ Done |
+| 2 | `siemctl alerts` query interface | `roadmap-soc-improvements.md` Batches 1–2 | 2 | Sonnet 5 — high, medium | ✅ Done |
+| 3 | Alert state management | `roadmap-soc-improvements.md` Batch 3 | 1 | Sonnet 5 — medium | ✅ Done |
+| 4 | Alert suppression rules | `roadmap-soc-improvements.md` Batch 4 | 1 | Sonnet 5 — high | ✅ Done |
 
 All four prerequisites are complete as of 2026-07-02 — every batch in both
 detail docs is done. Every batch above was plain Rust feature work with a

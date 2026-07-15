@@ -2,7 +2,7 @@
 
 > **Status: implemented** (2026-07-02, Batches 1–4 in the Implementation Plan
 > below). This doc remains the design record; for usage see
-> [user-guide.md](user-guide.md#digest) and `config/digest.toml`.
+> [user-guide.md](../user-guide.md#digest) and `config/digest.toml`.
 
 A structured shift-briefing command that reduces a time window of SIEM data
 into an anomaly-oriented summary. Intended as the primary entry point for
@@ -573,12 +573,12 @@ renderers in Batch 3):
 This digest is **one of three prerequisites** that doc names for the automated
 analyst loop, not the only one:
 
-1. `siemctl alerts` — alert query interface (`docs/roadmap-soc-improvements.md`
+1. `siemctl alerts` — alert query interface (`roadmap-soc-improvements.md`
    item 1). Not covered by this plan. The digest's own Alerts section reads
    `data/alerts/` directly and internally, but Tier 2/3 of the analyst design
    need a general-purpose query interface over alerts (`--query` DSL,
    `--correlated`, `SELECT _raw`) — that's separate, unbuilt work.
-2. Alert suppression rules (`docs/roadmap-soc-improvements.md` item 4). Not
+2. Alert suppression rules (`roadmap-soc-improvements.md` item 4). Not
    covered by this plan. Without it, Tier 2 triage in the analyst design
    drowns in known false positives (e.g. Suricata TCP-stream noise on CDN
    ranges).
