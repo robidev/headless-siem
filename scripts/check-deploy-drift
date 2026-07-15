@@ -65,7 +65,7 @@ for bin in normalized indexd ruled correlated siemctl; do
         deployed_ts="$(echo "$line" | awk '{print $2}')"
 
         crate_head="$(git -C "$PROJECT_ROOT" log -1 --format=%H -- "src/${bin}" Cargo.lock Cargo.toml 2>/dev/null)"
-        if [[ -z "$crate_head" ]] || git -C "$PROJECT_ROOT" merge-base --is-ancestor "$deployed" "$crate_head" 2>/dev/null; then
+        if [[ -z "$crate_head" ]] || git -C "$PROJECT_ROOT" merge-base --is-ancestor "$crate_head" "$deployed" 2>/dev/null; then
             line_status="up to date (deployed ${deployed:0:8} @ ${deployed_ts}, no relevant commits since)"
         else
             behind="$(git -C "$PROJECT_ROOT" rev-list --count "${deployed}..${crate_head}" -- "src/${bin}" Cargo.lock Cargo.toml 2>/dev/null)"
