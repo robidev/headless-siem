@@ -146,7 +146,7 @@ fn resolve_raw_line(data_dir: &Path, raw_file: &str, byte_offset: u64) -> Result
 /// attempt). 3 attempts at 200ms doubling = ~600ms worst case (200ms + 400ms).
 ///
 /// Deliberately small. The "siem db unavailable during role runs" incidents
-/// (implementation-plan.md issue #43 and its follow-ups) were long
+/// (llm-based-soc's archived plan issue #43 and its follow-ups) were long
 /// *misdiagnosed* as a transient indexd bucket-rotation race and this retry
 /// was once inflated to 9 attempts / ~51s chasing an imagined "~3-minute
 /// self-heal." That is NOT what those incidents were: their real cause was

@@ -69,7 +69,7 @@ note = "Single src_ip crossed runbooks/haproxy.md's 3+-separate-days threshold (
 # 1009-firewall-port-scan fires on every filterlog block; the overwhelming
 # majority of volume is routine multicast/broadcast background noise
 # (IGMP/mDNS/SSDP/MLDv2/NDP), not scan activity. filterlog forwarding was
-# silent 2026-07-04..07-09 (implementation-plan.md #44); this is the first
+# silent 2026-07-04..07-09 (llm-based-soc's archived plan issue #44); this is the first
 # full window of confirmed-clean post-fix production data
 # (2026-07-09T21:11:19Z-2026-07-10T05:48Z, 454 alerts, all to the
 # destinations below). Real port scans target unicast hosts, never these

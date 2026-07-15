@@ -65,8 +65,8 @@ are human-readable, survive crashes, and can be committed to git for audit trail
 
 ## 3. Notification dispatch
 
-> **Status: implemented** (2026-07-03, llm-based-soc implementation plan
-> Phase 1.3). Built the **alternative** design below (inotify watcher, no
+> **Status: implemented** (2026-07-03, llm-based-soc's archived plan §1.3).
+> Built the **alternative** design below (inotify watcher, no
 > `ruled`/`correlated` changes): `config/notify/alert-watch.sh` +
 > `config/systemd/headless-siem-alert-watch.service` +
 > `tests/integration/test-alert-watch.sh`. Watches `data/alerts/`
@@ -106,7 +106,7 @@ are human-readable, survive crashes, and can be committed to git for audit trail
 > reactive watch, both funneling through the same offset-tracked
 > `process_file()` so there's no double-notify risk. Also switched the
 > notify backend to a real, working `soc-notify` (ntfy.sh, public instance
-> for now — see `llm-based-soc/decisions.md` § 0.5) and verified the full
+> for now — see `llm-based-soc`'s archived decisions log § 0.5) and verified the full
 > path end-to-end against the live dev pipeline: injected alert → `ruled`
 > → watcher → `soc-notify` → push notification received.
 
@@ -167,8 +167,8 @@ the date so suppressions are reviewed rather than forgotten.
 
 ## 5. Time-trending / volume baselines
 
-> **Status: implemented** (2026-07-04, llm-based-soc implementation plan
-> Phase 1.4). `siemctl stats --interval Nh (--last Nh | --after ... --before
+> **Status: implemented** (2026-07-04, llm-based-soc's archived plan §1.4).
+> `siemctl stats --interval Nh (--last Nh | --after ... --before
 > ...) [--source SRC]` — matches the proposed design below closely (one
 > column per interval-sized bucket, one row per source, or per event type
 > with `--source`). `--interval` must be a whole number of hours (the index

@@ -10,7 +10,7 @@
 # alerts) is only touched if you explicitly ask for it; see usage below.
 #
 # STATUS: written but not yet exercised against a real install — see
-# implementation-plan.md appendix issue #42. Read through the "Plan"
+# llm-based-soc's archived plan appendix issue #42. Read through the "Plan"
 # output (--dry-run) before trusting this against a live system.
 #
 # Usage: sudo bash uninstall.sh --keep-data|--purge-data [--yes] [--dry-run]

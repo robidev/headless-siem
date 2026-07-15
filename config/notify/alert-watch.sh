@@ -205,7 +205,7 @@ process_file() {
 # never generates a CREATE event for the deeper levels at all — there's
 # nothing to "catch up on" later from the event stream, because the event
 # never existed. This is the exact same failure mode fixed for indexd in
-# implementation-plan.md 1.6 (see indexd's RECENT_FILE_SWEEP_INTERVAL doc
+# llm-based-soc's archived plan §1.6 (see indexd's RECENT_FILE_SWEEP_INTERVAL doc
 # comment for the full race analysis) — confirmed live here too: a
 # brand-new hour bucket's first alert.jsonl was written and never
 # processed by the reactive watch below.

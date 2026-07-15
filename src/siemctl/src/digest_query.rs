@@ -440,7 +440,7 @@ fn min_numeric_entry(dir: &Path, width: usize) -> Option<String> {
 /// looks "new" because there's no real prior period to compare against.
 /// This naturally stops firing once retention has aged the raw tree's
 /// start point past any realistic baseline window (see
-/// implementation-plan.md 1.8, item 29 / 2.4's retention cadence).
+/// llm-based-soc's archived plan §1.8, item 29 / §2.4's retention cadence).
 pub fn earliest_raw_event_time(data_dir: &Path) -> Option<DateTime<Utc>> {
     let raw_root = data_dir.join("raw");
     let year = min_numeric_entry(&raw_root, 4)?;
@@ -902,7 +902,7 @@ mod tests {
     fn completeness_flags_bucket_with_no_index_at_all() {
         let tmp = TempDir::new();
         // 44 raw lines, matching the real-world gap this check exists for
-        // (implementation-plan.md 1.6) — no index/ dir at all yet.
+        // (llm-based-soc's archived plan §1.6) — no index/ dir at all yet.
         write_raw_file(&tmp.path, "raw/2026/07/01/00/00/00", "sshd.jsonl", 44);
 
         let win = Window { start: ymdhms(2026, 7, 1, 0, 0, 0), end: ymdhms(2026, 7, 1, 1, 0, 0) };

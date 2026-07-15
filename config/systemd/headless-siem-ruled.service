@@ -22,7 +22,7 @@ StandardError=journal
 # StandardInput is a pipe fed by normalized: any normalized restart closes
 # the write end, ruled hits EOF and exits 0 (clean, not a "failure"), so
 # Restart=on-failure silently never brings it back. Restart=always covers
-# that case too (see implementation-plan.md issue #46).
+# that case too (see llm-based-soc's archived plan issue #46).
 Restart=always
 RestartSec=5
 

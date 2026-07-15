@@ -66,7 +66,7 @@ count_rule() {
 # Reads data/alerts/correlated/ — the same tree `siemctl alerts --correlated`
 # queries. (Previously this read data/correlated/, which matched dev.sh's
 # old --output path but not siemctl's read path — correlations "fired" but
-# were invisible to any siemctl query. See implementation-plan.md 1.5.)
+# were invisible to any siemctl query. See llm-based-soc's archived plan §1.5.)
 count_corr() {
   find "$DATA_DIR/alerts/correlated" -name '*.jsonl' -exec cat {} \; 2>/dev/null \
     | jq -r --arg c "$1" 'select(.correlation_id == $c) | .correlation_id' 2>/dev/null | wc -l
@@ -105,7 +105,7 @@ expect_no_new_rule() {
 # on disk. This is the launcher-parity check the plan calls for: it fails
 # if dev.sh's correlated --output path and siemctl's read path ever
 # disagree again (this is exactly how the alerts-invisible-to-queries bug
-# in implementation-plan.md 1.5 shipped undetected).
+# in llm-based-soc's archived plan §1.5 shipped undetected).
 expect_new_corr() {
   local corr_id="$1" base="$2" waited=0 n=0 d=0
   while [ "$waited" -lt "$SETTLE" ]; do

@@ -1,9 +1,8 @@
 # Design Proposal: Staged Cold-Storage Compaction & Compression
 
 > **Status: draft, unscheduled** (2026-07-03). Deliberately *not* part of the
-> SOC implementation plan (`llm-based-soc/implementation-plan.md`) — pick this
-> up independently whenever storage pressure warrants. Nothing in the SOC
-> path depends on it.
+> phased SOC rollout — pick this up independently whenever storage pressure
+> warrants. Nothing in the SOC path depends on it.
 
 Should logs and indexes be gzipped to save space — always, or staggered by
 age? Short answer: **yes, viable, and the staggered model is the right one**

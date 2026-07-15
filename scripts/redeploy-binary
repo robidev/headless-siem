@@ -20,7 +20,7 @@
 # With --restart: also runs `systemctl restart` on the matching unit.
 # Deliberately opt-in, not the default — restarting a live pipeline
 # component is exactly what caused the pipe-EOF/syslogd-crash incidents
-# documented in implementation-plan.md issues #46/#47, so this script
+# documented in llm-based-soc's archived plan issues #46/#47, so this script
 # won't do it silently.
 
 set -euo pipefail
@@ -55,8 +55,8 @@ fi
 
 echo "=== Building $CRATE (release) ==="
 # cargo lives under ~/.cargo/bin, which sudo's secure_path strips (same
-# gotcha as `claude` itself, see llm-based-soc/implementation-plan.md) —
-# invoke it by full path rather than relying on PATH surviving sudo -u.
+# gotcha as `claude` itself) — invoke it by full path rather than relying
+# on PATH surviving sudo -u.
 BUILD_USER="${SUDO_USER:-$(id -un)}"
 CARGO_BIN="$(sudo -u "$BUILD_USER" bash -lc 'command -v cargo' 2>/dev/null || true)"
 [[ -n "$CARGO_BIN" ]] || { echo "ERROR: couldn't resolve cargo for user $BUILD_USER (checked via login shell PATH)"; exit 1; }

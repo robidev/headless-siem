@@ -9,7 +9,7 @@
 # Checks these 5 units in order and restarts only the ones that are not
 # already active (never touches a healthy unit — restarting a *working*
 # service is what caused the pipe-EOF and syslogd-crash incidents this
-# script exists to catch, see implementation-plan.md issues #46/#47):
+# script exists to catch, see llm-based-soc's archived plan issues #46/#47):
 #   headless-siem-normalized
 #   headless-siem-indexd
 #   headless-siem-ruled
