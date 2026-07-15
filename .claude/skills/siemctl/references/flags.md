@@ -114,6 +114,63 @@ descending, ties broken by group-key ascending. `LIMIT` in group mode is applied
 also enforced by the renderer across buckets via `Renderer::is_done()`, which callers
 check to break out of the bucket-scan loop early.
 
+## `siemctl alerts`
+
+```
+siemctl alerts [--query "<dsl>"] [--correlated] [--all]
+               [--after H | --before H | --window W]
+               [--format json|tsv|tsv-noheader] [--data-dir DIR]
+siemctl alerts ack <rule_id> [--note "text"] [--data-dir DIR]
+```
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--data-dir`, `-d` | path | `./data` | |
+| `--query`, `-q` | DSL string | `""` (match-all) | Same grammar as `search`, but compiled against an unrestricted field set — an empty `valid` set means **any** field name parses (no "unknown field" errors here). Resolved per-record at runtime: top-level alert keys, then the embedded event (`event` for a `ruled` alert, `sample_events[0]` for a `correlated` one). |
+| `--correlated` | flag | off | Only correlated alerts. Equivalent to `type == correlated` in `--query`. |
+| `--all` | flag | off | Include acked alerts (default view hides anything acked via `alerts ack` up to its watermark). |
+| `--after`, `-a` / `--before`, `-b` | `HourBucket` | none | Same bucket-pruning as `search`. Mutually exclusive with `--window`. |
+| `--window`, `-w` | duration | none | Relative (`10m`,`6h`,`24h`,`2d`) or explicit `start..end`, ending now. Mutually exclusive with `--after`/`--before` — combining them is an error. |
+| `--format` | `json` \| `tsv` \| `tsv-noheader` | `json` | |
+
+Reads both `data/alerts/YYYY/MM/DD/HH/alerts.jsonl` (from `ruled`) and
+`data/alerts/correlated/YYYY/MM/DD/HH/correlated.jsonl` (from `correlated`) — flat
+JSONL, not the SQLite index, evaluated directly per-record rather than compiled to SQL.
+Every record carries a synthetic `type` field (`ruled` or `correlated`); correlated
+alerts have no `level` field (no severity).
+
+### `siemctl alerts ack <rule_id>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--note` | string | none | Free-text, stored alongside the ack watermark. |
+| `--data-dir`, `-d` | path | `./data` | |
+
+Marks alerts for `<rule_id>` up to *right now* as acknowledged — a watermark
+(`data/alerts/ack.jsonl`), not a global switch or a delete. A new alert for the same
+`rule_id` fired afterward still shows up normally. `alerts --all` bypasses the ack
+filter entirely regardless of watermark.
+
+## `siemctl digest`
+
+```
+siemctl digest [--window DURATION] [--interval DURATION] [--format text|json] [--data-dir DIR]
+```
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--data-dir`, `-d` | path | `./data` | |
+| `--window` | duration | `6h` | Analysis period ending now. Relative (`1h`,`6h`,`24h`) or explicit `start..end`. |
+| `--interval` | duration | `10m` | Trending bucket size within the window. |
+| `--format` | `text` \| `json` | `text` | Any other value is a clean parse error. |
+
+Anomaly-oriented shift-briefing: coverage/health, volume deltas vs. the
+immediately-preceding baseline period, network trends, auth activity, alert summary,
+and notable low-volume events. Spike-percentage/unparsed-event thresholds are read
+from `config/digest.toml` if present, else built-in defaults — see that file for the
+actual numbers. Always exits `0` once flags parse successfully (an invalid
+`--window`/`--interval`/`--format` is the only way to get a non-zero exit).
+
 ## `siemctl tail`
 
 ```

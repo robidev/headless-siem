@@ -28,6 +28,9 @@ siemctl (Rust) — standalone CLI, reads the filesystem above directly:
   digest   anomaly-oriented shift-briefing summary over a time window
   alerts   query + acknowledge ruled/correlated alerts (data/alerts/ack.jsonl)
   status / stats / tail / retention / dry-run / validate
+
+alert-watch (bash) — inotify watcher on data/alerts/, independent of siemctl:
+  dispatches alerts >= a configurable level to an external notify script
 ```
 
 ## Design Principles
@@ -104,13 +107,14 @@ cat tests/fixtures/sshd.log | ./target/release/normalized --stdin --dry-run --so
   - `digest` — anomaly-oriented shift-briefing: coverage/health, volume deltas vs. the preceding baseline, network trends, auth activity, alerts, and notable events, in text or JSON (the primary input for LLM-assisted triage)
   - `alerts` — query ruled + correlated alerts with the same DSL as `search`; `alerts ack <rule_id>` acknowledges a rule's alerts up to now (a watermark, not a global switch)
   - `status`, `stats`, `tail`, `retention` (also compacts stale ack state), `dry-run`, `validate`
-- **Integration tests** — 8 test scripts in `tests/integration/` (plus 16 detection-trigger scripts in `tests/detections/`) exercise the full pipeline end-to-end. 369 unit tests across the workspace.
+- **Alert notification** — `config/notify/alert-watch.sh` (`headless-siem-alert-watch` service) watches `data/alerts/` via inotify (plus a periodic reconciliation sweep for the new-directory race) and dispatches any alert at/above a configurable level (default: `high`) to an external notify script — pluggable via `SOC_NOTIFY_SCRIPT`, called as `<script> <priority> <subject> <body-file>`. No opinion on the delivery channel; bring your own script.
+- **Integration tests** — 10 test scripts in `tests/integration/` (plus 16 detection-trigger scripts in `tests/detections/`) exercise the full pipeline end-to-end. 430 tests across the workspace (`cargo test --workspace`).
 - **Documentation** — Guides and design docs in `docs/` covering parsers, detection rules (with a per-rule catalog in `docs/detections/`), indexing verification, correlation testing, a user guide, the digest/alerts/suppression design docs, and the SOC improvement roadmap.
 
 ### In Progress / Known Gaps
 
 - **Rule coverage** — 10 Sigma rules and 4 correlation rules shipped; still narrow relative to the Sigma ecosystem, and there's no automated FP-tuning loop yet beyond manually authored `--suppress` rules and `alerts ack`.
-- **Automated triage loop** — `digest`, `alerts` (query + ack), and `ruled --suppress` are the three prerequisites `docs/design-llm-soc-analyst.md` names for a scheduled, tiered (Haiku → Sonnet → Sonnet+tools) LLM triage loop — all three are built, but the loop itself (a cron-scheduled agent reading the digest and escalating) is still just a design doc, not running anywhere.
+- **No built-in triage automation** — `digest`, `alerts` (query + ack), and `ruled --suppress` give a consumer everything it needs to poll this SIEM on a schedule and triage/acknowledge findings (see `docs/design-llm-soc-analyst.md` for the design rationale behind that split), but actually running such a loop — cron scheduling, escalation policy, ticketing — is outside this project's scope. `siemctl` and the pipeline stop at the query/ack interface.
 - **Alert state** — `siemctl alerts ack <rule_id>` is a single watermark per rule (hide up to now); there's no per-alert investigation state (closed/false-positive/etc.) beyond that.
 - **Processing-time windows** — `ruled` dedup and `correlated` windows key off wall-clock
   processing time, not event time. This is correct for a live tail. For batch/historical replay,
@@ -118,7 +122,7 @@ cat tests/fixtures/sshd.log | ./target/release/normalized --stdin --dry-run --so
   follow-up.
 - **Performance tuning** — No benchmarking or throughput optimization yet.
 - **Packaging** — No system packages (`.deb`/`.rpm`) or container images; build-from-source only.
-- **Alerting** — No built-in push notification channels (email, webhook, Slack); alerts are filesystem/CLI-only (`siemctl alerts`, `siemctl digest`).
+- **Alerting** — `alert-watch` dispatches to *a* notify script, but ships none itself — no built-in email/webhook/Slack backend; the operator has to provide `SOC_NOTIFY_SCRIPT`.
 - **Dashboard** — No web UI or visualization layer; `siemctl` is CLI-only.
 
 The project is functional and can ingest, normalize, index, detect, correlate, summarize, and triage-query in a home-lab setting, but it is still evolving — expect rough edges and missing conveniences.

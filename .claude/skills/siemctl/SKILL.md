@@ -1,6 +1,6 @@
 ---
 name: siemctl
-description: Use when searching, tailing, validating, or dry-running headless-siem's data directory — status/stats/search/tail/retention/dry-run/validate commands.
+description: Use when searching, tailing, validating, or dry-running headless-siem's data directory — status/stats/search/alerts/digest/tail/retention/dry-run/validate commands.
 ---
 
 # siemctl
@@ -9,16 +9,18 @@ description: Use when searching, tailing, validating, or dry-running headless-si
 
 `siemctl` is the read-side CLI for the headless-siem pipeline: a standalone Rust binary
 that queries the filesystem (`data/raw/`) and SQLite index (`data/index/`) built by
-`normalized`/`indexd`/`ruled`/`correlated`. It never writes to the pipeline; it only
-reads, searches, validates config, and prunes old data.
+`normalized`/`indexd`/`ruled`/`correlated`. It never writes to the pipeline (except
+`alerts ack`, a small watermark file — see below); otherwise it only reads, searches,
+validates config, and prunes old data.
 
 Reach for it when a Claude session needs to: find specific events (`search`), check
-whether the pipeline is healthy and what's indexed (`status`, `stats`), watch events as
-they arrive (`tail`), sanity-check `sources.toml`/Sigma rules before deploying them
-(`validate`), test a parser or rule change against a fixture without touching real data
-(`dry-run`), or clean up old data (`retention`). For writing new parsers or rules, see
-`docs/normalized-writing-parsers.md` and `docs/guide-detection-rules.md` instead — this
-skill covers the query/ops surface only.
+whether the pipeline is healthy and what's indexed (`status`, `stats`), review
+Sigma/correlation output (`alerts`), get an anomaly-oriented shift-briefing summary
+(`digest`), watch events as they arrive (`tail`), sanity-check `sources.toml`/Sigma
+rules before deploying them (`validate`), test a parser or rule change against a
+fixture without touching real data (`dry-run`), or clean up old data (`retention`). For
+writing new parsers or rules, see `docs/normalized-writing-parsers.md` and
+`docs/guide-detection-rules.md` instead — this skill covers the query/ops surface only.
 
 ## Install / Build
 
@@ -52,6 +54,8 @@ Quick index — `siemctl <command> --help` always works and is authoritative:
 | `status` | Data dir size, per-source file counts, index coverage. `--verbose` adds config field inventory. |
 | `stats` | Event counts per source (or event-type breakdown + field coverage % with `--source`). |
 | `search` | Query the SQLite index via a small DSL (`--query`), or bypass it with `--raw`. |
+| `alerts` | Query `ruled`/`correlated` alert JSONL (same DSL as `search`, evaluated directly against records — no fixed schema). `alerts ack <rule_id>` sets a hide-until-now watermark. |
+| `digest` | Anomaly-oriented shift-briefing: coverage/health, volume deltas vs. a prior baseline, network/auth trends, alerts, notable low-volume events. `--window` (default `6h`), `--format text\|json`. |
 | `tail` | Stream raw JSONL as it's written (follows by default). |
 | `retention` | Delete files older than N days; `--days 0` wipes everything (confirmation required). |
 | `dry-run` | Pipe a fixture file through `normalized` (+ `ruled` if `--rules` given), report match/alert rates. |
@@ -105,6 +109,16 @@ siemctl search --raw 'Failed password' --after 2026-07-12T07:00:00
 **Count events by severity:**
 ```bash
 siemctl search --query "severity, count GROUP BY severity"
+```
+
+**Recent high/critical alerts:**
+```bash
+siemctl alerts --query "level == high OR level == critical" --window 6h
+```
+
+**Shift-briefing digest for the last 6 hours:**
+```bash
+siemctl digest --window 6h
 ```
 
 ## Usage Examples
@@ -239,13 +253,23 @@ Always-indexed fields (available for all sources) are: `timestamp`, `hostname`, 
   identically. `AND` binds tighter than `OR` — use parens to override.
 - **`tail --follow` (default) never exits** — it polls every 200ms for new time-bucket
   directories. Use `--no-follow`/`-F` for a one-shot dump, or background/timeout it.
+- **`alerts`' `--query` isn't validated against the Indexed Fields table above** —
+  alerts are flat JSONL (`data/alerts/`, `data/alerts/correlated/`), not the SQLite
+  index, so any field name is accepted and resolved dynamically against the record's
+  own keys / embedded event. `search`'s indexed-field restriction doesn't apply here.
+- **`alerts` hides acked alerts by default** — `alerts ack <rule_id>` sets a
+  hide-until-now watermark, not a permanent suppression; a new alert for the same
+  `rule_id` after the ack still shows up. `--all` bypasses the filter entirely.
+- **`digest`'s trend/spike thresholds come from `config/digest.toml`** if present,
+  otherwise built-in defaults — two hosts can show different digest output for
+  identical data if their `digest.toml` differs.
 
 ## Exit Codes
 
 | Code | Meaning |
 |---|---|
-| `0` | Success. For `search`: at least one match was found/emitted. |
-| `1` | Command-level failure or "no results": unknown command, unknown flag, missing required flag, config/data errors (`Err` from any `cmd_*` handler), `search` producing zero rows, `stats`/`tail`/`search --raw` finding no files. |
+| `0` | Success. For `search`/`alerts`: at least one match was found/emitted. `digest` is always `0` once flags parse — an empty/quiet period is still a valid report. |
+| `1` | Command-level failure or "no results": unknown command, unknown flag, missing required flag, config/data errors (`Err` from any `cmd_*` handler), `search`/`alerts` producing zero rows, `stats`/`tail`/`search --raw` finding no files. |
 | (none run) | `--help`/`-h` at any level prints usage and exits `0`. |
 
 `siemctl` never panics on user-facing errors — all `Result` errors are caught in `run()`
