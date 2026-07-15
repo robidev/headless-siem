@@ -96,7 +96,7 @@ are human-readable, survive crashes, and can be committed to git for audit trail
 > **Update (2026-07-04):** running this live surfaced a real miss — a
 > brand-new hour bucket's first alert was never notified on. Root cause is
 > the same class of inotify recursive-watch race fixed for `indexd` in
-> item 27/Phase 1.6 (a multi-level-deep directory chain can be created
+> llm-based-soc's archived plan, item 27/§1.6 (a multi-level-deep directory chain can be created
 > faster than the watcher installs a watch on the new intermediate
 > levels, so the kernel never emits an event for it — nothing to catch up
 > on later, because the event never existed). Fixed with the same

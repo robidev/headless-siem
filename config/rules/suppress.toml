@@ -30,7 +30,7 @@
 # rule_id = "suricata-2210029"
 # condition = 'cidr_match(src_ip, "172.64.0.0/13")'
 
-# Candidates from llm-based-soc/runbooks/haproxy.md (Phase 3.1, 2026-07-07)
+# Candidates from llm-based-soc/runbooks/haproxy.md (2026-07-07)
 # — real production data, 2026-07-04..07-07, all confirmed internet-scanner
 # ranges probing the reverse proxy's TLS listener. Commented pending
 # tuner-dev review, same as the rest of this file.
