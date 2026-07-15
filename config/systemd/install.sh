@@ -91,6 +91,11 @@ cp -r "$PROJECT_ROOT/config/sources.toml" /etc/headless-siem/
 if [[ -f "$PROJECT_ROOT/config/normalized.toml" ]]; then
     cp "$PROJECT_ROOT/config/normalized.toml" /etc/headless-siem/
 fi
+# digest.toml: optional anomaly-flag thresholds for `siemctl digest`
+# (copy only if it exists — digest works with defaults without it)
+if [[ -f "$PROJECT_ROOT/config/digest.toml" ]]; then
+    cp "$PROJECT_ROOT/config/digest.toml" /etc/headless-siem/
+fi
 cp -r "$PROJECT_ROOT/config/rules" /etc/headless-siem/
 # correlations.toml: cross-rule correlation window/threshold definitions for correlated
 cp "$PROJECT_ROOT/config/correlations.toml" /etc/headless-siem/

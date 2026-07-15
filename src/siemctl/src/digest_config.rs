@@ -45,15 +45,27 @@ struct AlertsToml {
     concentration_threshold_pct: Option<f64>,
 }
 
-/// Locate `config/digest.toml`, same search order as `sources::find_sources_toml`
-/// and `normconfig::find_normalized_toml`: relative to the cwd, then walking up
-/// from the binary's own location.
+/// Locate `digest.toml`: explicit override, cwd/dev-tree, the production
+/// install location, or walking up from the running binary. Same search
+/// order as `sources::find_sources_toml` and `normconfig::find_normalized_toml`.
 pub fn find_digest_toml() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("SIEMCTL_CONFIG_DIR") {
+        let c = Path::new(&dir).join("digest.toml");
+        if c.is_file() {
+            return Some(c);
+        }
+    }
     for rel in &["config/digest.toml", "../config/digest.toml"] {
         let p = Path::new(rel);
         if p.is_file() {
             return Some(p.to_path_buf());
         }
+    }
+    // Production install location (see config/systemd/install.sh) — a flat
+    // copy, not a config/ subdir, so it's checked directly.
+    let prod = Path::new("/etc/headless-siem/digest.toml");
+    if prod.is_file() {
+        return Some(prod.to_path_buf());
     }
     let exe = std::env::current_exe().ok()?;
     let mut dir = exe.parent()?;
