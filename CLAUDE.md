@@ -8,13 +8,13 @@ The five crates form a **Cargo workspace** (root `Cargo.toml`): one `Cargo.lock`
 
 ```bash
 # Build all 5 binaries (release mode)
-make           # or: just all  — both wrap `cargo build --release`
+make           # wraps `cargo build --release`
 
 # Build a single crate
 cargo build --release -p ruled
 
 # Run all tests (cargo unit tests + integration tests)
-make test      # or: just test — wraps `cargo test` + the integration scripts
+make test      # wraps `cargo test` + the integration scripts
 
 # Run tests for a single crate
 cargo test -p ruled
@@ -25,7 +25,7 @@ bash tests/integration/test-pipeline.sh
 # Install raw units for local poking around (requires root) — dev-tree
 # paths baked into the units, no config copied, no data dir created.
 # NOT a real deployment; see below.
-make install   # or: just install
+make install
 
 # Real production install (requires root) — rewrites paths, installs
 # config/ to /etc/headless-siem, creates /var/lib/headless-siem, enables

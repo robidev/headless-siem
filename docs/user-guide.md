@@ -327,6 +327,16 @@ target/debug/siemctl dry-run \
 
 ## Operations
 
+Everything below assumes a running pipeline — either a real deployment, or
+a local dev instance started with `./dev.sh start` (`./dev.sh status`,
+`./dev.sh logs [stage]` to check on it, `./dev.sh stop`/`restart` to manage
+it). Iterating on rules or config against a dev instance without
+restarting everything: `./dev.sh reload rules|norm|index` restarts only
+the affected stage(s) — see `./dev.sh` (no args) for the full command
+list and each reload mode's specific hot-reload gotchas (e.g. `reload
+index` doesn't retroactively add new fields to already-written index
+buckets).
+
 ### Searching
 
 `siemctl search` takes **one query expression** in a small SQL-ish DSL via
@@ -605,6 +615,46 @@ find data/raw/ -name '*.jsonl' | sed 's|.*/||' | sort | uniq -c | sort -rn
 # Check index health
 find data/index/ -name '*.db' -exec sqlite3 {} "SELECT COUNT(*) FROM events;" \;
 ```
+
+### Operational Scripts
+
+Three scripts in `scripts/`, for operating a deployed instance (as opposed
+to `dev.sh`, which is for local development — see Quick Start). All three
+are read-only or restart-only; none of them touch log data.
+
+```bash
+scripts/check-deploy-drift          # is what's running == what's on disk == what's merged?
+sudo scripts/redeploy-binary <normalized|indexd|ruled|correlated|siemctl> [--restart]
+sudo scripts/soc-restart-pipeline   # restart only the units that are down
+```
+
+- **`check-deploy-drift`** — read-only. Compares each binary's stamped
+  commit (`/etc/headless-siem/.deployed-revisions`, written by
+  `install.sh`/`redeploy-binary`) against the latest commit that actually
+  touched that crate, and — for the 4 systemd-managed binaries — whether
+  the *running* process is using the current on-disk binary (an
+  unlink+rename install leaves an already-running process on its old
+  inode until the service restarts). Needs `sudo` for the full picture
+  (reading `/proc/<pid>/exe` for services running as a different user).
+  Exit `0`: everything matches. Exit `1`: something is stale or a service
+  needs a restart.
+- **`redeploy-binary <crate> [--restart]`** — builds and installs one
+  binary from the current checkout, and stamps it in
+  `.deployed-revisions`. The targeted-hotfix path — use
+  `config/systemd/install.sh` instead for anything touching `config/`,
+  systemd units, or a first-time install. Without `--restart`, the new
+  binary is on disk but not live until the service restarts (deliberately
+  not automatic — see below). `siemctl` has no running process, so
+  `--restart` never applies to it.
+- **`soc-restart-pipeline`** — takes no arguments; checks the 5 fixed
+  systemd units (`headless-siem-{normalized,indexd,ruled,correlated,alert-watch}`)
+  and restarts only the ones that aren't already active, never a healthy
+  one. Restarting a *working* service is what caused two real production
+  incidents (pipe-EOF and syslogd-crash, both from restarting something
+  that didn't need it) — that's why every restart path here is
+  opt-in/targeted rather than automatic, and why this script's own
+  restarts are rate-limited (10 min cooldown) with a notification on
+  every actual restart.
 
 ### Retention
 

@@ -32,7 +32,7 @@ cargo build --release -p siemctl   # → target/release/siemctl
 cargo build -p siemctl             # → target/debug/siemctl (for dev/testing)
 ```
 
-`make` / `just all` builds all 5 binaries at once. Run cargo from the repo root.
+`make` builds all 5 binaries at once. Run cargo from the repo root.
 
 **Gotcha:** `siemctl dry-run` shells out to the `normalized` and `ruled` binaries.
 It looks for them next to its own exe assuming a *per-crate* `src/<name>/target/<profile>/<name>`
