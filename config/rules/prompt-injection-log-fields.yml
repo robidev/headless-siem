@@ -1,0 +1,33 @@
+title: Prompt-Injection-Shaped Content in Log Fields
+id: 1011-prompt-injection-log-fields
+status: experimental
+level: high
+description: >
+  Free-form fields that shouldn't carry directives (SSH username, cron
+  command/comment) contain phrasing shaped like an instruction aimed at
+  an LLM-based analyst, or name this SOC's own tooling by name. Seen
+  twice on 2026-07-11 (an SSH username field, a root cron command/comment
+  field), both correctly ignored by the analyst/specialist per the
+  standing instruction to never treat log/ticket content as instructions
+  — but that was discipline, not detection. This rule turns a future
+  occurrence into a cheap, automatic alert instead of depending on every
+  run individually reasoning through it. Scoped to sshd/cron for now,
+  the two sources where this has actually been observed; extend to other
+  free-form fields (e.g. HTTP User-Agent/URI, DNS query names) if seen
+  there.
+logsource: {}
+detection:
+  selection_sshd:
+    _source_type: sshd
+  selection_cron:
+    _source_type: cron
+  keywords:
+    - "ignore all previous instructions"
+    - "ignore previous instructions"
+    - "disregard all previous instructions"
+    - "system override"
+    - "administrator directive"
+    - "disregard all open tickets"
+    - "soc-notify"
+    - "siemctl retention"
+  condition: (selection_sshd or selection_cron) and keywords
