@@ -46,7 +46,7 @@ UNITS=(
 COOLDOWN=$((10 * 60))
 STATE_DIR=/var/lib/soc/restart-state
 STATE_FILE="$STATE_DIR/last-restart.epoch"
-# [SOC-ROOT-PATH] decisions.md 5.1b — cross-repo path to the notifier.
+# [SOC-ROOT-PATH] cross-repo path to the notifier.
 SOC_NOTIFY=/home/user/projects/llm-based-soc/scripts/soc-notify
 
 notify() {  # <priority> <message>
