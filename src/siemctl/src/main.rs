@@ -880,12 +880,14 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
     let mut before: Option<time::HourBucket> = None;
     let mut window: Option<String> = None;
     let mut format = render::Format::Json;
+    let mut no_limit = false;
 
     let mut it = args.iter().map(String::as_str).peekable();
     while let Some(arg) = it.next() {
         match arg {
             "--data-dir" | "-d" => data_dir = PathBuf::from(next_arg(&mut it, arg)?),
             "--query" | "-q" => dsl = Some(next_arg(&mut it, arg)?.to_string()),
+            "--no-limit" => no_limit = true,
             "--raw" => {
                 // Optional substring argument: consume the next token unless it
                 // is another flag.
@@ -960,9 +962,28 @@ fn cmd_search(args: &[String], valid_fields: &HashSet<String>) -> Result<i32> {
     q.after = after;
     q.before = before;
 
+    // An explicit LIMIT in the query always wins; --no-limit opts out of the
+    // default entirely. Otherwise fall back to DEFAULT_ROW_CAP so a query with
+    // neither a narrow SELECT nor a LIMIT can't dump an unbounded number of
+    // rows into the caller's context — see query::DEFAULT_ROW_CAP's doc
+    // comment.
+    let default_applied = q.limit.is_none() && !no_limit;
+    if default_applied {
+        q.limit = Some(query::DEFAULT_ROW_CAP);
+    }
+
     let mut renderer =
         render::Renderer::new(format, q.select.clone(), io::BufWriter::new(io::stdout()), q.limit);
     let rc = query::run_query(&data_dir, &q, &mut renderer);
+    // Truncation notice goes to stderr, never stdout — several canned queries
+    // pipe stdout straight into `jq`, and a stray non-JSON line would break that.
+    if default_applied && renderer.emitted() >= query::DEFAULT_ROW_CAP {
+        eprintln!(
+            "siemctl: showing first {} matches (default row cap reached) — add an explicit \
+             LIMIT to your --query or pass --no-limit to see more",
+            renderer.emitted()
+        );
+    }
     renderer.flush().ok();
     rc
 }
@@ -990,7 +1011,13 @@ fn print_search_help() {
          \x20                        exclusive with --after/--before.\n\
          \x20 --format FMT           Output format: json (default), tsv, tsv-noheader\n\
          \x20 --data-dir DIR         Data directory (default: ./data)\n\
+         \x20 --no-limit             Disable the default row cap below (an explicit\n\
+         \x20                        LIMIT in --query always applies regardless)\n\
          \x20 --help                 Show this help\n\
+         \n\
+         A query with no explicit LIMIT is capped at 150 rows by default (a\n\
+         warning is printed to stderr if the cap is reached) so an unbounded\n\
+         --query can't dump unbounded output; pass --no-limit to disable this.\n\
          \n\
          DSL grammar:\n\
          \x20 query   := [SELECT f1,f2,...] [WHERE] [expr] [GROUP BY f1,f2,...] [LIMIT n]\n\

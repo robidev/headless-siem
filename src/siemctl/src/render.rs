@@ -103,6 +103,14 @@ impl<W: Write> Renderer<W> {
         self.limit.map(|lim| self.emitted >= lim).unwrap_or(false)
     }
 
+    /// Records emitted so far — capped at `limit` if one was set, since
+    /// emission stops there. Used by callers that apply a default limit and
+    /// need to tell whether it was actually reached (vs. the result set
+    /// being smaller than the cap all along).
+    pub fn emitted(&self) -> usize {
+        self.emitted
+    }
+
     /// Emit a structured record (e.g. one index row).
     pub fn emit_record(&mut self, rec: &Record) -> io::Result<()> {
         if self.is_done() { return Ok(()); }

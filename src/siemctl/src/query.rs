@@ -33,6 +33,24 @@ use crate::db::{self, MatchMode};
 use crate::render::{Record, Renderer, Val};
 use crate::time;
 
+/// Default row cap applied by `siemctl search` when the DSL gives no explicit
+/// `LIMIT` and `--no-limit` wasn't passed (see `main.rs`'s `cmd_search`) — an
+/// unbounded index query with no `GROUP BY`, or one grouped on a
+/// near-unique field, dumps thousands of raw rows straight into whatever
+/// consumed the output (three `context_balloon` tickets from the same root
+/// cause on 2026-07-16, see
+/// `ticketing-system/tuner-dev/20260716T192600.100_siemctl-search-default-output-cap.md`).
+///
+/// Sized against the *worst* observed per-row JSON width — a full-row query
+/// with no `SELECT` projection — measured against real data in this clone:
+/// `kernel` and `filterlog` both ran close to 950-960 bytes/row, the widest
+/// of several sources sampled. Using 1000 bytes/row as a rounded-up margin,
+/// 150 rows is ~150KB, comfortably (~25%) under `context-balloon-scan`'s
+/// 200KB threshold even in that worst case. A `SELECT` with a handful of
+/// projected fields, or a low-cardinality `GROUP BY`, runs far smaller per
+/// row in practice and rarely reaches this cap at all.
+pub const DEFAULT_ROW_CAP: usize = 150;
+
 // ── AST ──────────────────────────────────────────────────────────────────────
 
 /// A parsed `--query` expression: predicate tree + optional grouping/limit, plus
