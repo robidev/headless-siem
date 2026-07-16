@@ -41,6 +41,16 @@ contains = " filterlog "
 reparse = true
 reparse_as = "filterlog"
 
+# Proxmox web-UI/API-ticket PAM auth path. Seen live on pve1 with a
+# malformed/unexplained app_name tag ("IPCC.xs" instead of a sensible
+# program name), which otherwise mints a spurious one-off _source_type
+# and trips digest's new-source detection. Match on the PAM message body
+# itself (stable regardless of what the syslog tag says) and force a
+# consistent source label.
+[[overrides.rule]]
+contains = "pam_unix(proxmox-ve-auth:auth)"
+source = "proxmox-ve-auth"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # sshd
 #
@@ -387,6 +397,9 @@ pattern = "^(?P<src_ip>[\d.]+):(?P<src_port>\d+) \[[^\]]+\] (?P<frontend>[^/ ]+)
 pattern = "(?P<haproxy_tls>SSL handshake failure)"
 # Best-effort HTTP access fields, when present in the request capture
 pattern = "\"(?P<http_method>[A-Z]+) (?P<http_uri>\S+) HTTP/"
+# Pre-handshake connection log line — no frontend/backend split like above,
+# just the client, the destination, and the named proxy in parens.
+pattern = "^Connect from (?P<src_ip>[\d.]+):(?P<src_port>\d+) to (?P<backend>[\d.]+):\d+ \((?P<frontend>[^/]+)/HTTP\)"
 
 [[extract.rule]]
 app_name = "haproxy"
