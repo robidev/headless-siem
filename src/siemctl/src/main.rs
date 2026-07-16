@@ -1309,7 +1309,11 @@ fn cmd_digest(args: &[String]) -> Result<i32> {
         }
     }
 
-    let now = chrono::Utc::now();
+    // Lag "now" behind real wall-clock time so a relative --window (and its
+    // baseline, which derives from it) never reads back data from the last
+    // few minutes indexd might still be catching up on — see
+    // digest::NOW_LAG_SECONDS's doc comment.
+    let now = chrono::Utc::now() - chrono::Duration::seconds(digest::NOW_LAG_SECONDS);
     let win = time::parse_window(&window_arg, now)
         .map_err(|e| format!("invalid --window: {e}"))?;
     let interval = time::parse_duration(&interval_arg)
