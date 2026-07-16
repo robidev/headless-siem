@@ -397,6 +397,9 @@ pattern = "^(?P<src_ip>[\d.]+):(?P<src_port>\d+) \[[^\]]+\] (?P<frontend>[^/ ]+)
 pattern = "(?P<haproxy_tls>SSL handshake failure)"
 # Best-effort HTTP access fields, when present in the request capture
 pattern = "\"(?P<http_method>[A-Z]+) (?P<http_uri>\S+) HTTP/"
+# Pre-handshake connection log line — no frontend/backend split like above,
+# just the client, the destination, and the named proxy in parens.
+pattern = "^Connect from (?P<src_ip>[\d.]+):(?P<src_port>\d+) to (?P<backend>[\d.]+):\d+ \((?P<frontend>[^/]+)/HTTP\)"
 
 [[extract.rule]]
 app_name = "haproxy"
