@@ -63,6 +63,24 @@ pub const DEFAULT_UNPARSED_MIN_EVENTS: u64 = 50;
 pub const DEFAULT_CONCENTRATION_THRESHOLD_PCT: f64 = 80.0;
 pub const DEFAULT_WAN_INTERFACE: &str = "re1";
 pub const DEFAULT_TOP_BLOCKED_LIMIT: usize = 20;
+
+/// How far behind real wall-clock `now` the digest's shared window/baseline
+/// anchor is deliberately held back, so neither the digest window nor its
+/// baseline ever depends on the last few minutes of data `indexd` may not
+/// have caught up on yet (see `main.rs`'s `cmd_digest`, which subtracts this
+/// before calling `time::parse_window`). A lagging index read back
+/// near-zero counts for an actively-logging source, producing a spurious
+/// `flag=new baseline=0` on the very next digest run after real data starts
+/// flowing — see
+/// `ticketing-system/tuner-dev/20260716T163247.000_digest-baseline-zero-index-lag-suspected.md`.
+/// 300s matches `indexd`'s own documented worst-case catch-up bound
+/// (`RECENT_FILE_SWEEP_INTERVAL` in `src/indexd/src/main.rs` — the periodic
+/// safety-net re-scan interval backstopping a missed inotify event); the
+/// reactive inotify path is normally near-instant, so this is a worst-case
+/// margin, not a typical delay. Only affects a relative `--window` (e.g.
+/// `"6h"`); an explicit `start..end` range ignores `now` entirely and is
+/// unaffected (`time::parse_window`).
+pub const NOW_LAG_SECONDS: i64 = 300;
 /// Default lookback for the coverage section's `new_sources`/`gone_silent`
 /// check — long enough to absorb the slowest named noisy sources'
 /// reporting jitter (`corosync`/`pmxcfs`, sub-daily but not hourly) without
