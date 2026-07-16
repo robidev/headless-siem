@@ -263,6 +263,15 @@ Always-indexed fields (available for all sources) are: `timestamp`, `hostname`, 
 - **`digest`'s trend/spike thresholds come from `config/digest.toml`** if present,
   otherwise built-in defaults — two hosts can show different digest output for
   identical data if their `digest.toml` differs.
+- **`digest`'s `now` is lagged 300s** before deriving a relative `--window` (and its
+  baseline) — absorbs `indexd`'s worst-case catch-up lag so a very-recent hour bucket
+  doesn't read back a spurious near-zero count. Explicit `start..end` windows are
+  unaffected. See `references/flags.md`'s `digest` section for the full rationale.
+- **`search` caps output at 150 rows by default** when the DSL has no explicit
+  `LIMIT` — pass `--no-limit` to see everything, or add `LIMIT n` to the query (which
+  always wins). The truncation notice goes to stderr only, so `| jq` pipelines are
+  unaffected. See `references/flags.md`'s `search` section. Not yet extended to
+  `siemctl alerts`.
 
 ## Exit Codes
 

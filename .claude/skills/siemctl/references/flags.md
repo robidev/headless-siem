@@ -44,7 +44,7 @@ Exit code: `1` if there is no data / no matching source at all, else `0` — eve
 
 ```
 siemctl search [--query "<dsl>"] [--raw [SUBSTRING]] [--after H] [--before H]
-               [--format json|tsv|tsv-noheader] [--data-dir DIR]
+               [--format json|tsv|tsv-noheader] [--no-limit] [--data-dir DIR]
 ```
 
 | Flag | Type | Default | Notes |
@@ -55,9 +55,22 @@ siemctl search [--query "<dsl>"] [--raw [SUBSTRING]] [--after H] [--before H]
 | `--after`, `-a` | `HourBucket` | none | Bucket-pruning only (coarse — hour granularity), applies to both `--query` and `--raw` paths. |
 | `--before`, `-b` | `HourBucket` | none | |
 | `--format` | `json` \| `tsv` \| `tsv-noheader` | `json` | Any other value is a clean parse error listing the three valid options. |
+| `--no-limit` | flag | off | Disables the default row cap below entirely. No effect if the DSL already has an explicit `LIMIT` (that always applies regardless). |
 
 Passing both `--query` and `--raw` is a clean error: `--raw and --query are mutually
 exclusive (--raw takes a literal substring, not a DSL expression)`.
+
+**Default row cap:** if the DSL has no explicit `LIMIT` and `--no-limit` wasn't
+passed, output is capped at `DEFAULT_ROW_CAP` = 150 rows (`src/siemctl/src/query.rs`)
+— applies to both plain-row and `GROUP BY` mode. When the cap is reached, a notice
+(`siemctl: showing first N matches (default row cap reached) — add an explicit LIMIT
+to your --query or pass --no-limit to see more`) is printed to **stderr only**, so
+piping stdout into `jq`/scripts is unaffected. An explicit `LIMIT n` in `--query`
+always wins and is never overridden by the default. Added 2026-07-16 after repeated
+`context_balloon` tickets from unbounded `search` queries; sized at 150 rows (~150KB
+at worst-case ~1000 bytes/row) to stay comfortably under `context-balloon-scan`'s
+200KB threshold. Note: `siemctl alerts` does **not** have this cap (not yet extended
+there — see Gotchas).
 
 ### DSL grammar (recursive descent, `src/siemctl/src/query.rs`)
 
@@ -170,6 +183,18 @@ and notable low-volume events. Spike-percentage/unparsed-event thresholds are re
 from `config/digest.toml` if present, else built-in defaults — see that file for the
 actual numbers. Always exits `0` once flags parse successfully (an invalid
 `--window`/`--interval`/`--format` is the only way to get a non-zero exit).
+
+**`now` is lagged 300s** (`digest::NOW_LAG_SECONDS`, `src/siemctl/src/digest.rs`):
+`cmd_digest` derives both the window and its baseline from `Utc::now() - 300s`, not
+raw wall-clock time, so a relative `--window` (e.g. `6h`) never lands its trailing
+edge in the last few minutes `indexd` might still be catching up on for a very
+recent hour bucket — a lagging index previously read back near-zero counts there,
+producing a spurious `flag=new baseline=0` on the next run once real data caught up.
+300s matches `indexd`'s own worst-case catch-up bound (`RECENT_FILE_SWEEP_INTERVAL`).
+**Only affects a relative `--window`** — an explicit `start..end` range ignores `now`
+entirely and is unaffected. Added 2026-07-16; see
+`ticketing-system/tuner-dev/20260716T163247.000_digest-baseline-zero-index-lag-suspected.md`
+(in `llm-based-soc/`) for the original incident.
 
 ## `siemctl tail`
 

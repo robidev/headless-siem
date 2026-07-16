@@ -400,6 +400,11 @@ siemctl search --data-dir data/ --query "_source_type == sshd GROUP BY src_ip,ev
 
 # Cap the rows emitted
 siemctl search --data-dir data/ --query "GROUP BY src_ip LIMIT 10"
+
+# No explicit LIMIT: capped at 150 rows by default (both row and GROUP BY
+# mode), with a "default row cap reached" notice on stderr. --no-limit
+# disables the cap; an explicit LIMIT above always overrides it either way.
+siemctl search --data-dir data/ --query "_source_type == haproxy" --no-limit
 ```
 
 **4. Time-range listing (empty predicate = match all):**
@@ -482,6 +487,12 @@ the primary input for LLM-assisted triage (`--format json`) as well as a
 human shift-briefing summary (`--format text`, the default). See
 [design-digest-command.md](design/design-digest-command.md) for the full spec and
 `digest.toml` above for tuning its anomaly thresholds.
+
+A relative `--window` (the default, or e.g. `24h`) is computed against `now`
+lagged 300s, not raw wall-clock time — so the window/baseline boundary never
+falls inside the last few minutes `indexd` might still be catching up on for
+a very recent hour bucket, which previously caused spurious `flag=new
+baseline=0` entries. An explicit `start..end` window is unaffected.
 
 ```bash
 # Default: last 6 hours vs. the 6 hours before that, text output
