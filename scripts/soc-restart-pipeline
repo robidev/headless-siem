@@ -36,6 +36,28 @@ UNITS=(
     headless-siem-alert-watch
 )
 
+# State-dir self-heal (added 2026-07-17): a full `siemctl retention
+# --days 0` wipe can delete state directories that systemd's mount
+# namespacing (ReadWritePaths=) requires to already exist -- found live
+# twice now (first /var/lib/headless-siem/alerts, then alert-watch/ and
+# alerts/correlated/ on 2026-07-17, the latter two crash-looping 45k+
+# times with a 226/NAMESPACE exit before anything noticed, since that
+# failure shape isn't a `systemctl is-active` false either way it just
+# never reaches "active"). Fixed set of paths, not derived from unit
+# state or any attacker-influenced input -- same "nothing here can be
+# steered" property as UNITS above. `install -d` is idempotent, so
+# running this against an already-present directory is always safe.
+REQUIRED_DIRS_headless_siem_alert_watch="/var/lib/headless-siem/alert-watch"
+REQUIRED_DIRS_headless_siem_correlated="/var/lib/headless-siem/alerts/correlated"
+ensure_state_dirs() {  # <unit>
+    local var="REQUIRED_DIRS_${1//-/_}" dirs d
+    dirs="${!var:-}"
+    [ -n "$dirs" ] || return 0
+    for d in $dirs; do
+        install -d -o user -g user -m 755 "$d" 2>/dev/null || true
+    done
+}
+
 # Rate-limit (runner-and-permissions.md §11.2(1)): a prompt-injected
 # analyst could be steered to trigger restarts repeatedly, and a restart
 # is exactly what caused the syslogd-crash/pipe-EOF incidents (#46/#47).
@@ -89,6 +111,7 @@ printf '%s\n' "$now" > "$STATE_FILE" 2>/dev/null || true
 overall_ok=0
 for unit in "${down[@]}"; do
     echo "$unit: restarting"
+    ensure_state_dirs "$unit"
     systemctl restart "$unit" 2>&1 || true
     sleep 2
     if systemctl is-active --quiet "$unit"; then
