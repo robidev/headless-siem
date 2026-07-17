@@ -51,6 +51,37 @@ reparse_as = "filterlog"
 contains = "pam_unix(proxmox-ve-auth:auth)"
 source = "proxmox-ve-auth"
 
+# FW1's own HAProxy package restart lines land with a rotating, unrelated
+# app_name tag (seen as both "php-cgi" and "php-fpm") instead of "haproxy" —
+# same class of bug as the proxmox-ve-auth case above. Match on the stable
+# restart message body itself so any future rotation to yet another bogus
+# tag is still caught.
+[[overrides.rule]]
+contains = "haproxy: starting old pid:"
+source = "haproxy"
+
+[[overrides.rule]]
+contains = "haproxy: started new pid:"
+source = "haproxy"
+
+# Desktop's system dbus daemon emits this warning under app_name
+# "cups-browsed" instead of "dbus-daemon" (which is the tag its other,
+# unrelated activation-chatter messages correctly use). Match on the
+# message body to fold it into the existing dbus-daemon source.
+[[overrides.rule]]
+contains = "Unhandled message: interface=org.freedesktop.DBus"
+source = "dbus-daemon"
+
+# pfSense's own webUI (lighttpd, not nginx — pfSense doesn't run nginx)
+# access-log lines are forwarded with app_name "nginx", minting a spurious
+# _source_type that trips digest's new-source detection. No existing source
+# label fits (pveproxy/spiceproxy are Proxmox's UI, not pfSense's); match on
+# hostname+tag together (stable regardless of which browser/admin hits the
+# webUI) and assign a new, stable label.
+[[overrides.rule]]
+contains = "FW1.homelab.lan nginx"
+source = "pfsense-webui"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # sshd
 #
