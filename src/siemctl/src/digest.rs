@@ -81,6 +81,21 @@ pub const DEFAULT_TOP_BLOCKED_LIMIT: usize = 20;
 /// `"6h"`); an explicit `start..end` range ignores `now` entirely and is
 /// unaffected (`time::parse_window`).
 pub const NOW_LAG_SECONDS: i64 = 300;
+/// Below this absolute event count (on *both* sides of the comparison),
+/// `build_volume`'s spike/drop percentages are small-number noise rather
+/// than a real signal — e.g. a low-cadence-but-regular source (a 5-minute
+/// heartbeat in a 10-minute window, expected count 2) can swing from
+/// count=2 to count=1 purely from a single tick landing a few seconds on
+/// the wrong side of the window boundary, which is a -50% "drop" with no
+/// real change in logging behavior. A *complete* drop to zero is exempted
+/// from this floor and always still flagged regardless of scale — "did
+/// this source log anything at all this window" doesn't get less
+/// meaningful the fewer events were expected, and it's exactly the
+/// failure mode a heartbeat-backed low-volume source (see
+/// `runbooks/haproxy.md`'s self-generated heartbeat mitigation) exists to
+/// catch. See
+/// `ticketing-system/tuner-dev/CLOSED_20260717T210550.778_haproxy-drop-flag-no-real-gap.md`.
+pub const DEFAULT_VOLUME_MIN_COUNT: u64 = 5;
 /// Default lookback for the coverage section's `new_sources`/`gone_silent`
 /// check — long enough to absorb the slowest named noisy sources'
 /// reporting jitter (`corosync`/`pmxcfs`, sub-daily but not hourly) without
@@ -147,6 +162,7 @@ pub struct WindowInfo {
 pub struct DigestConfig {
     pub spike_threshold_pct: f64,
     pub new_source_always_flag: bool,
+    pub volume_min_count: u64,
     pub unparsed_min_events: u64,
     pub coverage_lookback_hours: u64,
     pub concentration_threshold_pct: f64,
@@ -160,6 +176,7 @@ impl Default for DigestConfig {
         DigestConfig {
             spike_threshold_pct: DEFAULT_SPIKE_THRESHOLD_PCT,
             new_source_always_flag: true,
+            volume_min_count: DEFAULT_VOLUME_MIN_COUNT,
             unparsed_min_events: DEFAULT_UNPARSED_MIN_EVENTS,
             coverage_lookback_hours: DEFAULT_COVERAGE_LOOKBACK_HOURS,
             concentration_threshold_pct: DEFAULT_CONCENTRATION_THRESHOLD_PCT,
@@ -451,10 +468,17 @@ pub fn build_volume(
                 (None, flag)
             } else {
                 let pct = ((count as f64 - baseline as f64) / baseline as f64) * 100.0;
+                // Both sides of the comparison being under the noise floor
+                // means the percentage itself is unreliable — see
+                // DEFAULT_VOLUME_MIN_COUNT's doc comment. A complete drop to
+                // zero is the one exception: it's still flagged regardless
+                // of scale.
+                let below_noise_floor =
+                    baseline < cfg.volume_min_count && count < cfg.volume_min_count;
                 let flag = if pct > cfg.spike_threshold_pct {
-                    Some("spike".to_string())
+                    (!below_noise_floor).then(|| "spike".to_string())
                 } else if pct < -cfg.spike_threshold_pct {
-                    Some("drop".to_string())
+                    (count == 0 || !below_noise_floor).then(|| "drop".to_string())
                 } else {
                     None
                 };
@@ -1570,6 +1594,122 @@ mod tests {
         assert_eq!(anacron.baseline, 2);
         assert_eq!(anacron.delta_pct, Some(-100.0));
         assert_eq!(anacron.flag.as_deref(), Some("drop"));
+    }
+
+    #[test]
+    fn volume_suppresses_partial_drop_below_noise_floor() {
+        let tmp = TempDir::new();
+        let idx = tmp.path.join("index");
+        std::fs::create_dir_all(&idx).unwrap();
+
+        // A heartbeat-cadence source: window has 1 event, baseline had 2 —
+        // a -50% "drop" that's really just a single tick landing on the
+        // wrong side of the window boundary, not a real change in logging
+        // behavior (see
+        // ticketing-system/tuner-dev/CLOSED_20260717T210550.778_haproxy-drop-flag-no-real-gap.md).
+        let win_db = idx.join("2026-06-29-20.db");
+        let conn = Connection::open(&win_db).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        conn.execute(
+            "INSERT INTO events VALUES ('raw/2026/06/29/20/05/00/haproxy.jsonl', 'haproxy')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let base_db = idx.join("2026-06-29-19.db");
+        let conn = Connection::open(&base_db).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        for i in 0..2 {
+            conn.execute(
+                "INSERT INTO events VALUES (?1, 'haproxy')",
+                [format!("raw/2026/06/29/19/{:02}/00/haproxy.jsonl", i * 5)],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let win = Window { start: ymdhms(2026, 6, 29, 20, 0, 0), end: ymdhms(2026, 6, 29, 21, 0, 0) };
+        let rows = build_volume(&tmp.path, &win, &DigestConfig::default(), false).unwrap();
+        let haproxy = rows.iter().find(|r| r.source == "haproxy").unwrap();
+        assert_eq!(haproxy.count, 1);
+        assert_eq!(haproxy.baseline, 2);
+        assert_eq!(haproxy.delta_pct, Some(-50.0));
+        assert_eq!(haproxy.flag, None);
+    }
+
+    #[test]
+    fn volume_still_flags_complete_drop_to_zero_below_noise_floor() {
+        let tmp = TempDir::new();
+        let idx = tmp.path.join("index");
+        std::fs::create_dir_all(&idx).unwrap();
+
+        // Same low-volume shape as the suppressed-partial-drop case above,
+        // but the window has zero events, not one — a real, complete
+        // silence must still be flagged regardless of how few events were
+        // expected (this is the exact failure mode a heartbeat-backed
+        // source's mitigation exists to catch).
+        let win_db = idx.join("2026-06-29-20.db");
+        let conn = Connection::open(&win_db).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        drop(conn);
+        let base_db = idx.join("2026-06-29-19.db");
+        let conn = Connection::open(&base_db).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        for i in 0..2 {
+            conn.execute(
+                "INSERT INTO events VALUES (?1, 'haproxy')",
+                [format!("raw/2026/06/29/19/{:02}/00/haproxy.jsonl", i * 5)],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let win = Window { start: ymdhms(2026, 6, 29, 20, 0, 0), end: ymdhms(2026, 6, 29, 21, 0, 0) };
+        let rows = build_volume(&tmp.path, &win, &DigestConfig::default(), false).unwrap();
+        let haproxy = rows.iter().find(|r| r.source == "haproxy").unwrap();
+        assert_eq!(haproxy.count, 0);
+        assert_eq!(haproxy.baseline, 2);
+        assert_eq!(haproxy.delta_pct, Some(-100.0));
+        assert_eq!(haproxy.flag.as_deref(), Some("drop"));
+    }
+
+    #[test]
+    fn volume_suppresses_partial_spike_below_noise_floor() {
+        let tmp = TempDir::new();
+        let idx = tmp.path.join("index");
+        std::fs::create_dir_all(&idx).unwrap();
+
+        // Symmetric case: window has 3 events, baseline had 1 — a +200%
+        // "spike" that's just low-baseline percentage noise, same class
+        // of artifact as the drop case above.
+        let win_db = idx.join("2026-06-29-20.db");
+        let conn = Connection::open(&win_db).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO events VALUES (?1, 'haproxy')",
+                [format!("raw/2026/06/29/20/{:02}/00/haproxy.jsonl", i * 5)],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let base_db = idx.join("2026-06-29-19.db");
+        let conn = Connection::open(&base_db).unwrap();
+        conn.execute_batch("CREATE TABLE events (raw_file TEXT, _source_type TEXT);").unwrap();
+        conn.execute(
+            "INSERT INTO events VALUES ('raw/2026/06/29/19/05/00/haproxy.jsonl', 'haproxy')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let win = Window { start: ymdhms(2026, 6, 29, 20, 0, 0), end: ymdhms(2026, 6, 29, 21, 0, 0) };
+        let rows = build_volume(&tmp.path, &win, &DigestConfig::default(), false).unwrap();
+        let haproxy = rows.iter().find(|r| r.source == "haproxy").unwrap();
+        assert_eq!(haproxy.count, 3);
+        assert_eq!(haproxy.baseline, 1);
+        assert_eq!(haproxy.delta_pct, Some(200.0));
+        assert_eq!(haproxy.flag, None);
     }
 
     // ── network ──────────────────────────────────────────────────────────

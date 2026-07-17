@@ -25,6 +25,7 @@ struct RawDigestToml {
 struct VolumeToml {
     spike_threshold_pct: Option<f64>,
     new_source_always_flag: Option<bool>,
+    min_count: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -98,6 +99,7 @@ fn merge(raw: RawDigestToml, defaults: DigestConfig) -> DigestConfig {
     DigestConfig {
         spike_threshold_pct: volume.spike_threshold_pct.unwrap_or(defaults.spike_threshold_pct),
         new_source_always_flag: volume.new_source_always_flag.unwrap_or(defaults.new_source_always_flag),
+        volume_min_count: volume.min_count.unwrap_or(defaults.volume_min_count),
         unparsed_min_events: coverage.unparsed_min_events.unwrap_or(defaults.unparsed_min_events),
         coverage_lookback_hours: coverage
             .coverage_lookback_hours
@@ -135,6 +137,7 @@ mod tests {
         let cfg = merge(toml::from_str("").unwrap(), DigestConfig::default());
         let defaults = DigestConfig::default();
         assert_eq!(cfg.spike_threshold_pct, defaults.spike_threshold_pct);
+        assert_eq!(cfg.volume_min_count, defaults.volume_min_count);
         assert_eq!(cfg.unparsed_min_events, defaults.unparsed_min_events);
         assert_eq!(cfg.coverage_lookback_hours, defaults.coverage_lookback_hours);
         assert_eq!(cfg.wan_interface, defaults.wan_interface);
@@ -163,6 +166,7 @@ wan_interface = "wan0"
 [volume]
 spike_threshold_pct = 50
 new_source_always_flag = true
+min_count = 10
 
 [coverage]
 unparsed_min_events = 50
@@ -177,6 +181,7 @@ concentration_threshold_pct = 80
         let cfg = merge(toml::from_str(text).unwrap(), DigestConfig::default());
         assert_eq!(cfg.spike_threshold_pct, 50.0);
         assert!(cfg.new_source_always_flag);
+        assert_eq!(cfg.volume_min_count, 10);
         assert_eq!(cfg.unparsed_min_events, 50);
         assert_eq!(cfg.coverage_lookback_hours, 30);
         assert!(cfg.new_destination_always_flag);
