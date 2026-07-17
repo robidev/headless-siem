@@ -31,7 +31,16 @@ ExecStart=/home/user/projects/headless-siem/target/release/normalized \
 StandardOutput=file:/run/headless-siem/normalized-out.pipe
 StandardError=journal
 
-Restart=on-failure
+# Observed 2026-07-17: normalized clean-exited (exit 0, no crash/panic/OOM
+# in the journal) after ~81min uptime with Restart=on-failure silently
+# *not* restarting it, since a 0 exit isn't a "failure" — the whole
+# ingestion pipeline sat blind until manually discovered. Root cause of
+# the exit itself is still unknown, but per the same reasoning already
+# applied to ruled/correlated (issue #46), a log normalizer has no
+# legitimate reason to exit on its own, so Restart=always at least turns
+# a silent death into a fast, visible restart-loop instead of permanent
+# silence.
+Restart=always
 RestartSec=5
 
 # Security hardening
