@@ -4,6 +4,10 @@
 
 A minimal, Unix-philosophy SIEM for home-lab environments. Filesystem is the database. Every component is a standalone binary that reads stdin and writes stdout. Nothing is opaque.
 
+## Related Projects
+
+- [llm-soc-toolkit](https://github.com/robidev/llm-soc-toolkit) — an LLM-driven SOC (role prompts, ticketing, runbooks) built on top of this SIEM's `siemctl` query/ack interface.
+
 ## Architecture
 
 ```
