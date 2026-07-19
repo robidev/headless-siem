@@ -82,6 +82,16 @@ source = "dbus-daemon"
 contains = "FW1.homelab.lan nginx"
 source = "pfsense-webui"
 
+# Desktop's kerneloops daemon logs its own unit-config warning under a
+# truncated app_name tag ("rneloops" instead of "kerneloops" — the leading
+# "ke" is dropped somewhere upstream), minting a spurious one-off
+# _source_type that trips digest's new-source detection. Match on the
+# stable message body itself and fold it into a correct, consistent
+# source label.
+[[overrides.rule]]
+contains = "kerneloops.service: Referenced but unset environment variable"
+source = "kerneloops"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # sshd
 #
