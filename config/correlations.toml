@@ -102,3 +102,26 @@ ordered      = false
   [[rule.step]]
   rule_id   = "1009-firewall-port-scan"
   min_count = 15
+
+# ─── HAProxy connect-volume flood ────────────────────────────────────────────
+# Same source IP opens 100+ connections to the reverse proxy within 1 hour —
+# well above ordinary traffic (the entire corpus lifetime baseline for any
+# single non-allowlisted src_ip against proxmox_reverse_proxy is under 20
+# total, tuner-dev/20260719T054919.000). join_field = src_ip. The known-benign
+# admin range (194.53.160.0/22, Alliander) and the already-suppressed
+# 217.103.119.155 scanner range are allowlisted out of 1012's own alert
+# stream via config/rules/suppress.toml, so they never contribute toward
+# min_count here — a bare volume threshold can't otherwise separate
+# Alliander's normal session traffic from a real flood (same ticket,
+# per-hour data pulled 2026-07-19).
+[[rule]]
+id           = "haproxy-connect-flood"
+title        = "HAProxy Connect Volume Flood"
+description  = "Same source IP opened 100+ connections to the reverse proxy within 1 hour, excluding allowlisted known-benign ranges — possible scan/flood against proxmox_reverse_proxy"
+window_seconds = 3600
+join_field   = "src_ip"
+ordered      = false
+
+  [[rule.step]]
+  rule_id   = "1012-haproxy-connect-volume"
+  min_count = 100

@@ -92,3 +92,25 @@ rule_id = "1009-firewall-port-scan"
 condition = 'dst_ip == "ff02::2" OR dst_ip == "ff02::c" OR dst_ip == "ff02::16" OR dst_ip == "ff02::fb"'
 expires = "2026-09-08"
 note = "IPv6 link-local multicast background noise (all-routers/SSDP/MLDv2/mDNS) — runbooks/filterlog.md. Per-host solicited-node multicast (ff02::1:ff00:0/104, IPv6 NDP/DAD) isn't covered: cidr_match() is IPv4-only (src/ruled/src/suppress.rs), so ff02::/16 can't be expressed as one CIDR here."
+
+# Allowlist for the new 1012-haproxy-connect-volume signal rule
+# (correlations.toml's 'haproxy-connect-flood', min_count=100/1h) —
+# tuner-dev/20260719T054919.000. Without this, 194.53.160.0/22's ordinary
+# admin-session volume (5,000+ connects/hour on both a confirmed-benign day
+# and the day that originally looked like a flood — no threshold separates
+# the two, per that ticket's 2026-07-19T15:00:43Z comment) would trip the
+# correlation constantly. This suppresses 1012 alerts only — 1007's TLS-probe
+# suppressions above are untouched, so a real rejected handshake from these
+# ranges still alerts normally.
+
+[[suppress]]
+rule_id = "1012-haproxy-connect-volume"
+condition = 'cidr_match(src_ip, "194.53.160.0/22")'
+expires = "2026-10-19"
+note = "Alliander N.V. (RIPE-registered) operator office/admin egress range, runbooks/haproxy.md 'Known-benign: registered office/admin access'. Re-verify RDAP registration is unchanged before renewing past expires."
+
+[[suppress]]
+rule_id = "1012-haproxy-connect-volume"
+condition = 'src_ip == "217.103.119.155"'
+expires = "2026-10-19"
+note = "Already-suppressed 1007-haproxy-tls-probe scanner IP (see that entry above for the exact-match-not-range rationale — this /24 also contains this homelab's own WAN IP). Allowlisted here too so the same known source doesn't double-ticket via the new connect-volume correlation as well as 1007."
