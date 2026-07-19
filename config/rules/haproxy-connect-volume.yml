@@ -1,0 +1,21 @@
+title: HAProxy Connect Volume (correlation signal)
+id: 1012-haproxy-connect-volume
+status: experimental
+level: low
+description: >
+  Fires on every haproxy pre-handshake "Connect from" line, regardless of
+  outcome — unlike 1007-haproxy-tls-probe, which only fires on rejected TLS
+  handshakes. Individual matches are not meaningful on their own (this is
+  the normal shape of any client, benign or not, opening a connection to
+  the reverse proxy); the signal is the per-source-IP volume within a
+  window, escalated by the 'haproxy-connect-flood' correlation rule in
+  correlations.toml. See tuner-dev/20260719T054919.000 (scoped design) and
+  tuner-dev/20260719T030835.097 (originating detection-gap proposal) for
+  the rationale and threshold derivation.
+logsource:
+  service: haproxy
+detection:
+  selection:
+    _source_type: haproxy
+    message|startswith: "Connect from "
+  condition: selection
