@@ -185,6 +185,42 @@ mod tests {
         let b = HourBucket { year: 2026, month: 6, day: 22, hour: 8 };
         assert_eq!(b.label(), "06-22 08:00");
     }
+
+    // ── dirs_in_range_under ──────────────────────────────────────────────
+
+    #[test]
+    fn dirs_in_range_under_finds_dirs_beyond_the_old_one_year_cap() {
+        // Regression test: a fixed `366 * 24 + 1`-iteration cap used to
+        // silently truncate any [from, to] span over ~1 year, which is
+        // exactly what `siemctl alerts --before <cutoff>` (no `--after`)
+        // hits — it defaults the missing lower bound to a year-2000
+        // sentinel, so the range to any real cutoff is decades long.
+        let n = std::sync::atomic::AtomicU64::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "hsiem_time_test_{}_{}",
+            std::process::id(),
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = HourBucket { year: 2026, month: 7, day: 20, hour: 2 };
+        std::fs::create_dir_all(real.dir_under(&base)).unwrap();
+
+        // ~2.5 years / ~21,900 hours — well past the old 8,785-hour cap.
+        let from = HourBucket { year: 2024, month: 1, day: 1, hour: 0 };
+        let to = HourBucket { year: 2026, month: 7, day: 20, hour: 23 };
+        let dirs = dirs_in_range_under(&base, from, to);
+
+        std::fs::remove_dir_all(&base).ok();
+        assert_eq!(dirs, vec![real.dir_under(&base)]);
+    }
+
+    #[test]
+    fn dirs_in_range_under_from_after_to_is_empty() {
+        let base = Path::new("/nonexistent/base");
+        let from = HourBucket { year: 2026, month: 7, day: 20, hour: 5 };
+        let to = HourBucket { year: 2026, month: 7, day: 20, hour: 4 };
+        assert!(dirs_in_range_under(base, from, to).is_empty());
+    }
 }
 
 /// Yield existing `raw/` hour directories in [`from`, `to`] (inclusive).
@@ -198,11 +234,17 @@ pub fn hour_dirs_in_range(data_dir: &Path, from: HourBucket, to: HourBucket) -> 
 /// for `siemctl alerts`, not just `data_dir/raw`).
 pub fn dirs_in_range_under(base: &Path, from: HourBucket, to: HourBucket) -> Vec<PathBuf> {
     let mut result = Vec::new();
+    if from > to {
+        return result;
+    }
+    // Iterate exactly the number of hour buckets in [from, to] — a fixed
+    // `366 * 24 + 1` cap here previously silently truncated any range over
+    // ~1 year (e.g. `--before` alone, which defaults the missing `--after`
+    // to a year-2000 sentinel: a ~26-year span that exhausted the old cap
+    // while still stuck in 2000-2001, before ever reaching real data).
+    let hours = (to.to_datetime() - from.to_datetime()).num_hours();
     let mut cur = from;
-    for _ in 0..(366 * 24 + 1) {
-        if cur > to {
-            break;
-        }
+    for _ in 0..=hours {
         let dir = cur.dir_under(base);
         if dir.is_dir() {
             result.push(dir);
