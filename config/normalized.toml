@@ -64,6 +64,19 @@ source = "haproxy"
 contains = "haproxy: started new pid:"
 source = "haproxy"
 
+# FW1's Suricata package log-rotation housekeeping also lands under the same
+# rotating bogus app_name tag as the haproxy-restart lines above ("php-cgi"
+# seen so far), but with unrelated content — routine log rotation, not an
+# IDS alert and not haproxy. Give it its own label (distinct from the real
+# "suricata" IDS-alert source above) rather than folding it into haproxy.
+[[overrides.rule]]
+contains = "[Suricata] Suricata LOGS ROTATION"
+source = "suricata-logrotate"
+
+[[overrides.rule]]
+contains = "[Suricata] Logs Mgmt job rotated"
+source = "suricata-logrotate"
+
 # Desktop's system dbus daemon emits this warning under app_name
 # "cups-browsed" instead of "dbus-daemon" (which is the tag its other,
 # unrelated activation-chatter messages correctly use). Match on the
