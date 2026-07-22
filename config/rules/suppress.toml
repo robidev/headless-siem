@@ -55,9 +55,9 @@ note = "Scanner range crossed runbooks/haproxy.md's 3+-separate-days threshold 2
 
 [[suppress]]
 rule_id = "1007-haproxy-tls-probe"
-condition = 'cidr_match(src_ip, "199.45.154.0/24")'
+condition = 'cidr_match(src_ip, "199.45.154.0/23")'
 expires = "2026-10-05"
-note = "Scanner range crossed runbooks/haproxy.md's 3+-separate-days threshold 2026-07-11 (Jul 1, Jul 5, Jul 11 — tuner-dev/20260711T185836.844, operator-filed); single src_ip 199.45.154.142, all tls_handshake_failure against proxmox_reverse_proxy, no successful handshake. Same expires horizon as the sibling ranges seeded from the same table."
+note = "Scanner range crossed runbooks/haproxy.md's 3+-separate-days threshold 2026-07-11 (Jul 1, Jul 5, Jul 11 — tuner-dev/20260711T185836.844, operator-filed); single src_ip 199.45.154.142, all tls_handshake_failure against proxmox_reverse_proxy, no successful handshake. Widened from /24 to /23 2026-07-20 (tuner-dev/20260720T100643.138, analyst-filed) after 199.45.155.111 alerted instead of suppressing — rdap-lookup confirms 199.45.154.0/23 is the actual registered Censys block (RIPE NET-199-45-154-0-1), not two separate ranges; 7d siemctl search confirms only .154.120 and .155.111 fired in this block, both pure tls_handshake_failure against proxmox_reverse_proxy, no other backend touched. Same expires horizon as the sibling ranges seeded from the same table."
 
 [[suppress]]
 rule_id = "1007-haproxy-tls-probe"
